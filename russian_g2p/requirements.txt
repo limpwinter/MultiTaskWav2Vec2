@@ -1,0 +1,3 @@
+lxml
+dawg
+git+https://github.com/bond005/rnnmorph.git
