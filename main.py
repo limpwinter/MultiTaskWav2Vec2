@@ -52,7 +52,7 @@ POSTAGS_PAD_TOKEN_ID = train_data_gen.data_processor.postag_pad_token_id
 print('Done')
 print('Getting First Batch...', end='')
 X, y = train_data_gen[0]
-assert len(X) == 2 and len(y) == 3
+assert len(X) == 2 and len(y) == 4
 print('Done')
 
 

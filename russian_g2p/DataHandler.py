@@ -84,6 +84,8 @@ class DataProcessor:
                                                           padding_value=0.0,
                                                           do_normalize=True,
                                                           return_attention_mask=True)
+        self.sencence_tokenizer = AutoTokenizer.from_pretrained("sberbank-ai/sbert_large_nlu_ru")
+        self.sentence_encoding_model = AutoModel.from_pretrained("sberbank-ai/sbert_large_nlu_ru")
 
     def decode_batch_predictions(self, pred):
         return self.tokenizer.batch_decode(pred)
@@ -161,10 +163,28 @@ class DataGenerator(torch.utils.data.Dataset):
         transcription[-1] = transcription[-1][:-1]
         merged = list(itertools.chain.from_iterable(transcription))
         # return  self.emb_proc.phn_to_int(merged)
-        print(''.join(merged))
+        # print(''.join(merged))
         return ''.join(merged)
         # np.array(merged).tofile('merged.txt', sep=' ', format='%s')
         # return self.data_processor.phonems_tokenizer(merged).input_ids
+
+    def get_sentences_embedding(self, sentences):
+        def mean_pooling(model_output, attention_mask):
+            token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            return sum_embeddings / sum_mask
+
+        encoded_input = self.data_processor.sencence_tokenizer(sentences, padding=True,
+                                                               truncation=True,
+                                                               return_tensors='pt')  # TODO Разобрать параметры
+        with torch.no_grad():
+            model_output = model(**encoded_input)
+
+        # Perform pooling. In this case, mean pooling
+        sentence_embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
+        return sentence_embeddings
 
     def __get_data(self, batches):
         # Generates data containing batch_size samples
@@ -185,7 +205,6 @@ class DataGenerator(torch.utils.data.Dataset):
                                                             is_split_into_words=False,
                                                             padding=True,
                                                             return_tensors='pt')  # Encoding with tokenizer
-        # y_phn_batch = pad_batch_arrays(y_phn_batch)
         y_phn_batch = y_phn_batch['input_ids'].masked_fill(y_phn_batch.attention_mask.ne(1), -100)
 
         y_pos_tags_batch = [self.get_pos_tags(y) for y in text_batch]
@@ -194,8 +213,9 @@ class DataGenerator(torch.utils.data.Dataset):
                                                                  padding=True,
                                                                  return_tensors='pt')
         y_pos_tags_batch = y_pos_tags_batch['input_ids'].masked_fill(y_pos_tags_batch.attention_mask.ne(1), -100)
+        y_sentence_embedding = self.get_sentences_embedding(text_batch)
 
-        return (x_data, x_mask), (y_text_batch, y_phn_batch, y_pos_tags_batch)
+        return (x_data, x_mask), (y_text_batch, y_phn_batch, y_pos_tags_batch, y_sentence_embedding)
 
     def __getitem__(self, index):
         batches = self.df[index * self.batch_size: (index + 1) * self.batch_size]
