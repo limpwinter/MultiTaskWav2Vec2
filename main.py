@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 
 import pandas as pd
@@ -5,6 +6,7 @@ import torch
 import torch.nn as nn
 from tqdm.auto import tqdm
 import warnings
+from torchinfo import summary
 from torch.optim import AdamW
 from transformers import get_scheduler
 
@@ -16,14 +18,11 @@ from russian_g2p.DataHandler import (DataGenerator,
 
 from transformers import Wav2Vec2Model
 
-# from transformers.models.wav2vec2.modeling_wav2vec2 import CausalLMOutput
-
 warnings.filterwarnings("ignore")
 
 TRAIN_DATA_FOLDER = Path('data/train')
 TEST_DATA_FOLDER = Path('data/test')
 
-# MODEL_ID = "facebook/wav2vec2-large-xlsr-53"
 MODEL_PATH = 'models/wav2vec2-large-xlsr-53'
 MODEL_ID = 'facebook/wav2vec2-large-xlsr-53'
 
@@ -32,29 +31,25 @@ BATCH_SIZE = 16
 print('Reading Data...', end='')
 train_data = pd.read_json(TRAIN_DATA_FOLDER / Path("10min.jsonl"), lines=True)  # .sort_values('duration')
 test_data = pd.read_json(TEST_DATA_FOLDER / Path('crowd/manifest.jsonl'), lines=True)  # .sort_values('duration')
-
 test_data = test_data[test_data['text'] != ' ']
 train_data = train_data[train_data['text'] != ' ']
 print('Done')
-# train_data
-print('Creating Data Generator...', end='')
 
+print('Creating Data Generator...', end='')
 train_data_gen = DataGenerator(train_data,
                                batch_size=BATCH_SIZE,
-                               train=True,
-                               padding=True
+                               train=True
                                )
 CHAR_PAD_TOKEN_ID = train_data_gen.data_processor.char_pad_token_id
 PHONEM_PAD_TOKEN_ID = train_data_gen.data_processor.phn_pad_token_id
-# assert train_data_gen.data_processor.phonems_phn_map[PHONEM_PAD_TOKEN_ID] == '[PAD]'
 POSTAGS_PAD_TOKEN_ID = train_data_gen.data_processor.postag_pad_token_id
-
-print('Done')
-print('Getting First Batch...', end='')
-X, y = train_data_gen[0]
-assert len(X) == 2 and len(y) == 4
 print('Done')
 
+
+# print('Getting First Batch...', end='')
+# X, y = train_data_gen[0]
+# assert len(X) == 2 and len(y) == 4
+# print('Done')
 
 def mean_pooling(token_embeddings, attention_mask):
     # token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
@@ -100,6 +95,7 @@ class MyModel(nn.Module):
         logits = []
         hs_0 = self.dropout(hs_0)
         head_0_logits = self.fc0(hs_0)  # sentence embedding recognition head
+        # logits.append(head_0_logits)
 
         hs_1 = self.dropout(hs_1)
         head_1_logits = self.fc1(hs_1)  # part of speech tags recognition head
@@ -151,15 +147,16 @@ class MyModel(nn.Module):
             phonem_loss = compute_ctc_loss(phonem_labels, head_2_logits, PHONEM_PAD_TOKEN_ID, attention_mask)
             pos_tag_loss = compute_ctc_loss(pos_tags_labels, head_1_logits, POSTAGS_PAD_TOKEN_ID, attention_mask)
             sent_embedding = mean_pooling(head_0_logits, attention_mask)
-            target_simmilarity = torch.ones(BATCH_SIZE)  # TODO убрать глобальную переменную
+            batch_size = sent_embedding.shape[0]
+            target_simmilarity = torch.ones(batch_size)
             embedding_difference_loss = nn.functional.cosine_embedding_loss(sent_embedding,
                                                                             sentences_embeddings,
                                                                             target_simmilarity)
-            # TODO дописать аргументы и добавить avg pooling
+            embedding_difference_loss *= 100  # TODO Добавить коофициенты ко всем loss функциям и убрать магическое чилос)))
             losses = char_loss + pos_tag_loss + phonem_loss + embedding_difference_loss
 
         if losses is not None:
-            return losses
+            return head_3_logits, losses
         else:
             return logits
 
@@ -171,7 +168,7 @@ print('Creating Model...', end='')
 model = MyModel()
 print('Done')
 
-# summary(wav2vec, input_size=[(BATCH_SIZE, 240_000), (BATCH_SIZE, 240_000)])
+# summary(model, input_size=[(BATCH_SIZE, 240_000), (BATCH_SIZE, 240_000)])
 # print('-' * 18, 'Call Forward Method with loss', '-' * 18)
 
 # pred, loss = model(X[0],
@@ -198,10 +195,11 @@ for epoch in range(num_epochs):
     for i in range(len(train_data_gen)):
         (data, mask), labels = train_data_gen[i]
         # batch = {k: v.to(device) for k, v in batch.items()}
-        loss = model(data,
-                     mask,
-                     labels
-                     )
+        logits, loss = model(data,
+                             mask,
+                             labels
+                             )
+        logits = torch.argmax(logits, dim=-1)
         # loss = outputs.loss
         print(f'Epoch:{epoch}\tIteration:{i}\tLoss:{loss}')
         running_loss += loss.item()
@@ -210,4 +208,6 @@ for epoch in range(num_epochs):
         lr_scheduler.step()
         optimizer.zero_grad()
         progress_bar.update(1)
+        if i == len(train_data_gen):
+            print(train_data_gen.data_processor.decode_batch_predictions(logits))
     print(f'Loss on {epoch} epoch: {running_loss / len(train_data_gen)}')

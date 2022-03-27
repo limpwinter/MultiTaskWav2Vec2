@@ -38,6 +38,7 @@ pos_tags = ["ADJ", "ADP", "ADV", "AUX", "CONJ", "CCONJ",
 
 nlp = spacy.load("ru_core_news_lg")
 DATA_PATH = r"C:\Users\LimpWinter\Documents\Projects\Diploma\data"
+SENTENCE_TRANSFORMER_MODEL_ID = "sberbank-ai/sbert_large_nlu_ru"
 
 
 class DataProcessor:
@@ -51,17 +52,17 @@ class DataProcessor:
         self.characters_char_map = {v: k for k, v in enumerate(self.characters + ['[UNK]', '[PAD]'])}
         self.characters_index_map = {v: k for k, v in self.characters_char_map.items()}
         self.char_pad_token_id = self.characters_char_map['[PAD]']
-        print("char pad token id:", self.char_pad_token_id)
+        # print("char pad token id:", self.char_pad_token_id)
 
         self.phonems_phn_map = {v: k for k, v in enumerate(self.phonems + ['[UNK]', '[PAD]'])}
         self.phonems_index_map = {v: k for k, v in self.phonems_phn_map.items()}
         self.phn_pad_token_id = self.phonems_phn_map['[PAD]']
-        print("phn pad token id", self.phn_pad_token_id)
+        # print("phn pad token id", self.phn_pad_token_id)
 
         self.postags_tag_map = {v: k for k, v in enumerate(self.pos_tags + ['[UNK]', '[PAD]'])}
         self.postags_index_map = {k: v for k, v in self.postags_tag_map.items()}
         self.postag_pad_token_id = self.postags_tag_map['[PAD]']
-        print("postag pad token id", self.postag_pad_token_id)
+        # print("postag pad token id", self.postag_pad_token_id)
 
         with open('vocabs/char_vocab.json', 'w') as vocab_file:
             json.dump(self.characters_char_map, vocab_file)
@@ -87,21 +88,11 @@ class DataProcessor:
                                                           padding_value=0.0,
                                                           do_normalize=True,
                                                           return_attention_mask=True)
-        self.sencence_tokenizer = AutoTokenizer.from_pretrained("sberbank-ai/sbert_large_nlu_ru")
-        self.sentence_encoding_model = AutoModel.from_pretrained("sberbank-ai/sbert_large_nlu_ru")
+        self.sencence_tokenizer = AutoTokenizer.from_pretrained(SENTENCE_TRANSFORMER_MODEL_ID)
+        self.sentence_encoding_model = AutoModel.from_pretrained(SENTENCE_TRANSFORMER_MODEL_ID)
 
     def decode_batch_predictions(self, pred):
-        return self.tokenizer.batch_decode(pred)
-
-
-def pad_batch_arrays(batch):  # Устаревший
-    max_vec_len = [len(elem) for elem in batch]
-    max_vec_len = max(max_vec_len)
-    padded_batch = []
-    for elem in batch:
-        elem = list(elem) + [-100] * (max_vec_len - len(elem))
-        padded_batch.append(elem)
-    return torch.Tensor(padded_batch)
+        return self.char_tokenizer.batch_decode(pred)[0]
 
 
 class DataGenerator(torch.utils.data.Dataset):
@@ -109,8 +100,7 @@ class DataGenerator(torch.utils.data.Dataset):
             self,
             df,
             batch_size,
-            train=True,
-            padding=True
+            train=True
     ):
 
         self.df = df.sort_values('duration')  # сортирока чтобы  при паддинге занимать меньше места
@@ -118,7 +108,6 @@ class DataGenerator(torch.utils.data.Dataset):
         self.train = train  # Потом лучше вместо train передавать путь к файлам
         self.SAMPLE_RATE = 16_000
         self.data_processor = DataProcessor()
-        self.padding = padding
         self.n = len(self.df)
 
     def __get_input(self, wav_batch):
@@ -156,7 +145,6 @@ class DataGenerator(torch.utils.data.Dataset):
 
         # ставим ударения и заменяем "сломанные" слова
         accented = accentor.do_accents(text)[0]
-        # accented = [bad_words.get(word) if word in bad_words else word for word in accented]
         accented = [word.replace('+', '') if word.count('+') > 1 else word for word in accented]
 
         # создаем и кодируем транскрипции
@@ -165,29 +153,29 @@ class DataGenerator(torch.utils.data.Dataset):
         transcription = [np.append(lst, ['sil']) for lst in transcription]
         transcription[-1] = transcription[-1][:-1]
         merged = list(itertools.chain.from_iterable(transcription))
-        # return  self.emb_proc.phn_to_int(merged)
-        # print(''.join(merged))
         return ''.join(merged)
-        # np.array(merged).tofile('merged.txt', sep=' ', format='%s')
-        # return self.data_processor.phonems_tokenizer(merged).input_ids
 
     def get_sentences_embedding(self, sentences):
-        def mean_pooling(model_output, attention_mask):
+
+        def mean_pooling(model_output):
             token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
-            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            input_mask_expanded = torch.ones_like(token_embeddings)
             sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
             sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
             return sum_embeddings / sum_mask
 
-        encoded_input = self.data_processor.sencence_tokenizer(list(sentences), padding=True,
-                                                               truncation=True,
-                                                               return_tensors='pt')  # TODO Разобраться с входными параметрами
+        encoded_input = self.data_processor.sencence_tokenizer(list(sentences),
+                                                               padding=True,
+                                                               # truncation=True,
+                                                               return_tensors='pt')
+        # TODO Разобраться с входными параметрами sentence_tokenizer
+
         with torch.no_grad():
-            model_output = self.data_processor.sentence_encoding_model(**encoded_input)
+            output = self.data_processor.sentence_encoding_model(**encoded_input)
 
         # Perform pooling. In this case, mean pooling
-        sentence_embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
-        return sentence_embeddings
+        sentence_embeddings = mean_pooling(output)
+        return sentence_embeddings  # (BATCH_SIZE, emb_len)
 
     def __get_data(self, batches):
         # Generates data containing batch_size samples
@@ -199,7 +187,7 @@ class DataGenerator(torch.utils.data.Dataset):
         x_data, x_mask = self.__get_input(x_batch)  # padding with Wav2Vec2FeatureExtractor
 
         y_text_batch = self.data_processor.char_tokenizer(list(text_batch),
-                                                          padding=self.padding,
+                                                          padding=True,
                                                           return_tensors='pt')
         y_text_batch = y_text_batch['input_ids'].masked_fill(y_text_batch.attention_mask.ne(1), -100)
 
@@ -216,6 +204,7 @@ class DataGenerator(torch.utils.data.Dataset):
                                                                  padding=True,
                                                                  return_tensors='pt')
         y_pos_tags_batch = y_pos_tags_batch['input_ids'].masked_fill(y_pos_tags_batch.attention_mask.ne(1), -100)
+
         y_sentence_embedding = self.get_sentences_embedding(text_batch)
 
         return (x_data, x_mask), (y_text_batch, y_phn_batch, y_pos_tags_batch, y_sentence_embedding)
