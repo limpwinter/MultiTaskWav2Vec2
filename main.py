@@ -56,20 +56,31 @@ assert len(X) == 2 and len(y) == 4
 print('Done')
 
 
+def mean_pooling(token_embeddings, attention_mask):
+    # token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
+    # input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    input_mask_expanded = torch.ones_like(token_embeddings, dtype=torch.long)
+    sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+    return sum_embeddings / sum_mask
+
+
 class MyModel(nn.Module):
     def __init__(self):
         super(MyModel, self).__init__()
         self.wav2vec2 = Wav2Vec2Model.from_pretrained(MODEL_ID, output_hidden_states=True)
         self.wav2vec2_config = self.wav2vec2.config
-        self.embedding_size = self.wav2vec2_config.hidden_size
+        self.hidden_size = self.wav2vec2_config.hidden_size
         self.vocab_size = len(train_data_gen.data_processor.characters_index_map)  # char_to_num.vocabulary_size()
         self.phonems_size = len(train_data_gen.data_processor.phonems_index_map)  # char_to_num.vocabulary_size()
         self.pos_tags_size = len(train_data_gen.data_processor.postags_index_map)  # char_to_num.vocabulary_size()
+        self.embedding_size = 1024  # TODO Убрать это магическое число
 
         self.dropout = nn.Dropout(0.1)
-        self.fc1 = nn.Linear(self.embedding_size, self.vocab_size)
-        self.fc2 = nn.Linear(self.embedding_size, self.phonems_size)
-        self.fc3 = nn.Linear(self.embedding_size, self.pos_tags_size)
+        self.fc0 = nn.Linear(self.hidden_size, self.embedding_size)  # sentence embedding
+        self.fc1 = nn.Linear(self.hidden_size, self.pos_tags_size)  # pos tags head
+        self.fc2 = nn.Linear(self.hidden_size, self.phonems_size)  # phonems recognition head
+        self.fc3 = nn.Linear(self.hidden_size, self.vocab_size)  # characters recognition head
         self.wav2vec2.feature_extractor._freeze_parameters()
 
     def forward(self,
@@ -81,14 +92,17 @@ class MyModel(nn.Module):
         hidden_states = w2v2_output.hidden_states
         hs_len = len(hidden_states)
 
-        hs_1 = hidden_states[hs_len // 3 - 1]  # Числа взяты с потолка)))
-        hs_2 = hidden_states[(hs_len * 2) // 3 - 1]
-        hs_3 = hidden_states[(hs_len * 3) // 3 - 1]
+        hs_0 = hidden_states[0]  # слой для выявления самых низкоуровневых признаков
+        hs_1 = hidden_states[hs_len // 3 - 1]  # context depended hidden state
+        hs_2 = hidden_states[(hs_len * 2) // 3 - 1]  # middle hidden_state
+        hs_3 = hidden_states[(hs_len * 3) // 3 - 1]  # last_hidden_state
 
         logits = []
+        hs_0 = self.dropout(hs_0)
+        head_0_logits = self.fc0(hs_0)  # sentence embedding recognition head
 
         hs_1 = self.dropout(hs_1)
-        head_1_logits = self.fc1(hs_1)  # character recognition head
+        head_1_logits = self.fc1(hs_1)  # part of speech tags recognition head
         # logits.append(head_1_logits)
 
         hs_2 = self.dropout(hs_2)
@@ -96,11 +110,11 @@ class MyModel(nn.Module):
         # logits.append(head_2_logits)
 
         hs_3 = self.dropout(hs_3)
-        head_3_logits = self.fc3(hs_3)  # part of speech tags recognition head
+        head_3_logits = self.fc3(hs_3)  # characters recognition head
         # logits.append(head_3_logits)
         losses = None
 
-        def compute_loss(labels, logits, blank_label_idx, attention_mask):
+        def compute_ctc_loss(labels, logits, blank_label_idx, attention_mask):
             # if targets.max() >= vocab_size:
             #     raise ValueError(f"Label values must be <= vocab_size: {vocab_size}")
             #
@@ -132,11 +146,17 @@ class MyModel(nn.Module):
             return loss
 
         if labels is not None:
-            char_labels, phonem_labels, pos_tags_labels = labels
-            char_loss = compute_loss(char_labels, head_1_logits, CHAR_PAD_TOKEN_ID, attention_mask)
-            phonem_loss = compute_loss(phonem_labels, head_2_logits, PHONEM_PAD_TOKEN_ID, attention_mask)
-            pos_tag_loss = compute_loss(pos_tags_labels, head_3_logits, POSTAGS_PAD_TOKEN_ID, attention_mask)
-            losses = char_loss + pos_tag_loss + phonem_loss
+            char_labels, phonem_labels, pos_tags_labels, sentences_embeddings = labels
+            char_loss = compute_ctc_loss(char_labels, head_3_logits, CHAR_PAD_TOKEN_ID, attention_mask)
+            phonem_loss = compute_ctc_loss(phonem_labels, head_2_logits, PHONEM_PAD_TOKEN_ID, attention_mask)
+            pos_tag_loss = compute_ctc_loss(pos_tags_labels, head_1_logits, POSTAGS_PAD_TOKEN_ID, attention_mask)
+            sent_embedding = mean_pooling(head_0_logits, attention_mask)
+            target_simmilarity = torch.ones(BATCH_SIZE)  # TODO убрать глобальную переменную
+            embedding_difference_loss = nn.functional.cosine_embedding_loss(sent_embedding,
+                                                                            sentences_embeddings,
+                                                                            target_simmilarity)
+            # TODO дописать аргументы и добавить avg pooling
+            losses = char_loss + pos_tag_loss + phonem_loss + embedding_difference_loss
 
         if losses is not None:
             return losses
@@ -162,7 +182,7 @@ print('Done')
 # print(pred)
 # print(loss)
 # print(pred.shape)
-num_epochs = 1
+num_epochs = 3
 num_training_steps = num_epochs * len(train_data_gen)
 progress_bar = tqdm(range(num_training_steps))
 optimizer = AdamW(model.parameters(), lr=5e-5)
@@ -174,7 +194,8 @@ lr_scheduler = get_scheduler(name="linear",
                              )
 model.train()
 for epoch in range(num_epochs):
-    for i in range(num_training_steps):
+    running_loss = 0
+    for i in range(len(train_data_gen)):
         (data, mask), labels = train_data_gen[i]
         # batch = {k: v.to(device) for k, v in batch.items()}
         loss = model(data,
@@ -182,9 +203,11 @@ for epoch in range(num_epochs):
                      labels
                      )
         # loss = outputs.loss
-        print(loss)
+        print(f'Epoch:{epoch}\tIteration:{i}\tLoss:{loss}')
+        running_loss += loss.item()
         loss.backward()
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()
         progress_bar.update(1)
+    print(f'Loss on {epoch} epoch: {running_loss / len(train_data_gen)}')

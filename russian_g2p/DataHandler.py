@@ -6,7 +6,10 @@ import numpy as np
 import spacy
 import torch
 import torchaudio
-from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2CTCTokenizer
+from transformers import (Wav2Vec2FeatureExtractor,
+                          Wav2Vec2CTCTokenizer,
+                          AutoTokenizer,
+                          AutoModel)
 
 from russian_g2p.Accentor import Accentor
 from russian_g2p.Grapheme2Phoneme import Grapheme2Phoneme
@@ -34,7 +37,7 @@ pos_tags = ["ADJ", "ADP", "ADV", "AUX", "CONJ", "CCONJ",
             "SPACE"]
 
 nlp = spacy.load("ru_core_news_lg")
-DATA_PATH = r"C:\Users\LimpWinter\Documents\Projects\multitask_wav2vec\data"
+DATA_PATH = r"C:\Users\LimpWinter\Documents\Projects\Diploma\data"
 
 
 class DataProcessor:
@@ -176,11 +179,11 @@ class DataGenerator(torch.utils.data.Dataset):
             sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
             return sum_embeddings / sum_mask
 
-        encoded_input = self.data_processor.sencence_tokenizer(sentences, padding=True,
+        encoded_input = self.data_processor.sencence_tokenizer(list(sentences), padding=True,
                                                                truncation=True,
-                                                               return_tensors='pt')  # TODO Разобрать параметры
+                                                               return_tensors='pt')  # TODO Разобраться с входными параметрами
         with torch.no_grad():
-            model_output = model(**encoded_input)
+            model_output = self.data_processor.sentence_encoding_model(**encoded_input)
 
         # Perform pooling. In this case, mean pooling
         sentence_embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
