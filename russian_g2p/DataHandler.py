@@ -91,8 +91,9 @@ class DataProcessor:
         self.sencence_tokenizer = AutoTokenizer.from_pretrained(SENTENCE_TRANSFORMER_MODEL_ID)
         self.sentence_encoding_model = AutoModel.from_pretrained(SENTENCE_TRANSFORMER_MODEL_ID)
 
-    def decode_batch_predictions(self, pred):
-        return self.char_tokenizer.batch_decode(pred)[0]
+    def decode_batch_predictions(self, pred, group_tokens=True):
+        return self.char_tokenizer.batch_decode(pred,
+                                                skip_special_tokens=True)
 
 
 class DataGenerator(torch.utils.data.Dataset):
@@ -100,7 +101,8 @@ class DataGenerator(torch.utils.data.Dataset):
             self,
             df,
             batch_size,
-            train=True
+            train=True,
+            test_folder='crowd'
     ):
 
         self.df = df.sort_values('duration')  # сортирока чтобы  при паддинге занимать меньше места
@@ -109,6 +111,7 @@ class DataGenerator(torch.utils.data.Dataset):
         self.SAMPLE_RATE = 16_000
         self.data_processor = DataProcessor()
         self.n = len(self.df)
+        self.test_folder = test_folder
 
     def __get_input(self, wav_batch):
         processed_batch = self.data_processor.feature_extractor(
@@ -128,7 +131,7 @@ class DataGenerator(torch.utils.data.Dataset):
         if self.train:
             audio, sr = torchaudio.load(os.path.join(DATA_PATH, "train", wav_path))  # shape(channels=1,seq_len)
         else:
-            audio, sr = torchaudio.load(os.path.join(DATA_PATH, 'test', 'crowd', wav_path))
+            audio, sr = torchaudio.load(os.path.join(DATA_PATH, 'test', self.test_folder, wav_path))
         assert sr == self.SAMPLE_RATE
         return np.array(audio.squeeze(0))  # shape(seq_len,)
 
