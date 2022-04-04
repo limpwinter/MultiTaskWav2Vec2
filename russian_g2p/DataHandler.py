@@ -37,8 +37,11 @@ pos_tags = ["ADJ", "ADP", "ADV", "AUX", "CONJ", "CCONJ",
             "SPACE"]
 
 nlp = spacy.load("ru_core_news_lg")
+nlp.to_disk("models/my_nlp_model")
+
 DATA_PATH = r"C:\Users\LimpWinter\Documents\Projects\Diploma\data"
 SENTENCE_TRANSFORMER_MODEL_ID = "sberbank-ai/sbert_large_nlu_ru"
+SENTENCE_TRANSFORMER_MODEL_PATH = 'models/sbert_large_nlu_ru'
 
 
 class DataProcessor:
@@ -88,8 +91,8 @@ class DataProcessor:
                                                           padding_value=0.0,
                                                           do_normalize=True,
                                                           return_attention_mask=True)
-        self.sencence_tokenizer = AutoTokenizer.from_pretrained(SENTENCE_TRANSFORMER_MODEL_ID)
-        self.sentence_encoding_model = AutoModel.from_pretrained(SENTENCE_TRANSFORMER_MODEL_ID)
+        self.sencence_tokenizer = AutoTokenizer.from_pretrained(SENTENCE_TRANSFORMER_MODEL_PATH)
+        self.sentence_encoding_model = AutoModel.from_pretrained(SENTENCE_TRANSFORMER_MODEL_PATH)
 
     def decode_batch_predictions(self, pred, group_tokens=True):
         return self.char_tokenizer.batch_decode(pred,

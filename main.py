@@ -6,7 +6,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torchinfo import summary
 from tqdm.auto import tqdm
 from tqdm import trange
 from transformers import Wav2Vec2Model
@@ -24,11 +23,10 @@ warnings.filterwarnings("ignore")
 
 TRAIN_DATA_FOLDER = Path('data/train')
 TEST_DATA_FOLDER = Path('data/test')
-
 MODEL_ID = 'facebook/wav2vec2-large-xlsr-53'
-
+MODEL_PATH = 'models/wav2vec2-large-xlsr-53'
 BATCH_SIZE = 16
-NUM_EPOCHS = 3
+NUM_EPOCHS = 2
 
 print('Reading Data...', end='')
 train_data = pd.read_json(TRAIN_DATA_FOLDER / Path("10min.jsonl"), lines=True)  # .sort_values('duration')
@@ -44,14 +42,20 @@ train_data_gen = DataGenerator(train_data,
                                batch_size=BATCH_SIZE,
                                train=True
                                )
-
 test_data_gen = DataGenerator(test_data,
                               batch_size=BATCH_SIZE,
-                              train=False)
+                              train=False
+                              )
 
 CHAR_PAD_TOKEN_ID = train_data_gen.data_processor.char_pad_token_id
 PHONEM_PAD_TOKEN_ID = train_data_gen.data_processor.phn_pad_token_id
 POSTAGS_PAD_TOKEN_ID = train_data_gen.data_processor.postag_pad_token_id
+print('Done')
+
+print('Loading wer metric and tensorboard...', end='')
+wer_metric = load_metric("wer")
+tb = SummaryWriter()
+
 print('Done')
 
 
@@ -62,10 +66,11 @@ def mean_pooling(token_embeddings):
     return sum_embeddings / sum_mask
 
 
-class MyModel(nn.Module):
+class MultitaskWav2vecModel(nn.Module):
     def __init__(self):
-        super(MyModel, self).__init__()
-        self.wav2vec2 = Wav2Vec2Model.from_pretrained(MODEL_ID, output_hidden_states=True)
+        super(MultitaskWav2vecModel, self).__init__()
+        self.wav2vec2 = Wav2Vec2Model.from_pretrained(MODEL_PATH)
+        # self.wav2vec2.save_pretrained(MODEL_PATH)
         self.wav2vec2_config = self.wav2vec2.config
         self.hidden_size = self.wav2vec2_config.hidden_size
         self.vocab_size = len(train_data_gen.data_processor.characters_index_map)  # char_to_num.vocabulary_size()
@@ -73,7 +78,10 @@ class MyModel(nn.Module):
         self.pos_tags_size = len(train_data_gen.data_processor.postags_index_map)  # char_to_num.vocabulary_size()
         self.sentence_embedding_size = 1024  # sentence embedding size TODO Убрать это магическое число
 
-        self.dropout = nn.Dropout(0.1)
+        self.dp0 = nn.Dropout(0.1)
+        self.dp1 = nn.Dropout(0.1)
+        self.dp2 = nn.Dropout(0.1)
+        self.dp3 = nn.Dropout(0.1)
         self.fc0 = nn.Linear(self.hidden_size, self.sentence_embedding_size)  # sentence embedding
         self.fc1 = nn.Linear(self.hidden_size, self.pos_tags_size)  # pos tags head
         self.fc2 = nn.Linear(self.hidden_size, self.phonems_size)  # phonems recognition head
@@ -95,19 +103,19 @@ class MyModel(nn.Module):
         hs_3 = hidden_states[(hs_len * 3) // 3 - 1]  # high level features
 
         # logits = []
-        hs_0 = self.dropout(hs_0)
+        hs_0 = self.dp0(hs_0)
         head_0_logits = self.fc0(hs_0)  # sentence embedding recognition head
         # logits.append(head_0_logits)
 
-        hs_1 = self.dropout(hs_1)
+        hs_1 = self.dp1(hs_1)
         head_1_logits = self.fc1(hs_1)  # part of speech tags recognition head
         # logits.append(head_1_logits)
 
-        hs_2 = self.dropout(hs_2)
+        hs_2 = self.dp2(hs_2)
         head_2_logits = self.fc2(hs_2)  # phonems recognition head
         # logits.append(head_2_logits)
 
-        hs_3 = self.dropout(hs_3)
+        hs_3 = self.dp3(hs_3)
         head_3_logits = self.fc3(hs_3)  # characters recognition head
         # logits.append(head_3_logits)
         losses = None
@@ -163,33 +171,29 @@ class MyModel(nn.Module):
             return head_3_logits
 
 
-def train(model, device, train_data_generator, epoch, lr_scheduler, optimizer):
-    num_training_steps = epochs * len(train_data_generator)
-    progress_bar = trange(num_training_steps)
+def train(model, device, train_data_generator, epoch, lr_scheduler, optimizer, progress_bar):
     model.train()
     running_loss = 0
     for i in trange(len(train_data_generator)):
         (data, mask), labels = train_data_generator[i]
-        data, mask, labels = data.to(device), mask.to(device), labels.to(device)
+        data, mask, labels = data.to(device), mask.to(device), labels
         logits, loss = model(data,
                              mask,
                              labels
                              )
-        # logits = torch.argmax(logits, dim=-1)
         running_loss += loss.item()
         loss.backward()
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()
         progress_bar.update(1)
+    tb.add_scalar('Loss/train', running_loss / len(train_data_gen), epoch)
     print(f'Epoch: {epoch}\tLoss:{running_loss / len(train_data_gen)}')
 
 
-wer_metric = load_metric("wer")
-
-
-def test(model, device, data_generator):
+def test(model, device, data_generator, epoch):
     model.eval()
+    running_wer = 0
     with torch.no_grad():
         for i in trange(len(data_generator)):
             (data, mask), labels = data_generator[i]
@@ -201,29 +205,31 @@ def test(model, device, data_generator):
             labels = labels[0]
             label_str = data_generator.data_processor.decode_batch_predictions(labels, group_tokens=False)
             wer = wer_metric.compute(predictions=pred_ids, references=label_str)
-            print(wer)
+            running_wer += wer
+
+        tb.add_scalar('WER/test', running_wer / len(data_generator), epoch)
 
 
 print('Creating Model...', end='')
-model = MyModel()
+multitask_wav2vec2 = MultitaskWav2vecModel()
 print('Done')
 
-# writer = SummaryWriter()
-# (data, mask), labels = train_data_gen[0]
-# writer.add_graph(model, [data, mask])
-# writer.close()
 num_training_steps = NUM_EPOCHS * len(train_data_gen)
 progress_bar = tqdm(range(num_training_steps))
-optimizer = AdamW(model.parameters(), lr=5e-5)
+optimizer = AdamW(multitask_wav2vec2.parameters(), lr=5e-5)
 lr_scheduler = get_scheduler(name="linear",
                              optimizer=optimizer,
                              num_warmup_steps=0,
                              num_training_steps=num_training_steps
                              )
 
-use_cuda = not torch.cuda.is_available()
+use_cuda = not torch.cuda.is_available()  # TODO remove 'not'
 device = torch.device('cuda' if use_cuda else 'cpu')
 
-for epoch in range(1, NUM_EPOCHS + 1):
-    # train(model, device, train_data_gen, epoch, lr_scheduler, optimizer)
-    test(model, device, train_data_gen)
+# for epoch in range(1, NUM_EPOCHS + 1):
+#     train(multitask_wav2vec2, device, train_data_gen, epoch, lr_scheduler, optimizer, progress_bar)
+#     test(multitask_wav2vec2, device, train_data_gen, epoch)
+# tb.close()
+
+torch.save(multitask_wav2vec2.state_dict(), 'models/MultitaskWav2vec2')
+

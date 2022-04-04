@@ -2,3 +2,5 @@
 /.idea/
 /russian_g2p/__pycache__/
 /jiwer/
+/models/
+/runs/
