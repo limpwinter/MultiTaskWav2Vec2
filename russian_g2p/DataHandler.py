@@ -36,8 +36,8 @@ pos_tags = ["ADJ", "ADP", "ADV", "AUX", "CONJ", "CCONJ",
             "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X",
             "SPACE"]
 
-nlp = spacy.load("ru_core_news_lg")
-nlp.to_disk("models/my_nlp_model")
+nlp = spacy.load("models/ru_core_news_lg")
+# nlp.to_disk("models/my_nlp_model")
 
 DATA_PATH = r"C:\Users\LimpWinter\Documents\Projects\Diploma\data"
 SENTENCE_TRANSFORMER_MODEL_ID = "sberbank-ai/sbert_large_nlu_ru"
@@ -96,7 +96,8 @@ class DataProcessor:
 
     def decode_batch_predictions(self, pred, group_tokens=True):
         return self.char_tokenizer.batch_decode(pred,
-                                                skip_special_tokens=True)
+                                                skip_special_tokens=True,
+                                                group_tokens=group_tokens)
 
 
 class DataGenerator(torch.utils.data.Dataset):

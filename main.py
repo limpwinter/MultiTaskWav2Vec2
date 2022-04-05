@@ -10,8 +10,9 @@ from tqdm.auto import tqdm
 from tqdm import trange
 from transformers import Wav2Vec2Model
 from transformers import get_scheduler
-from datasets import load_metric
 from torch.utils.tensorboard import SummaryWriter
+from typing import List
+import numpy as np
 
 from russian_g2p.DataHandler import (DataGenerator,
                                      phonems,
@@ -26,7 +27,7 @@ TEST_DATA_FOLDER = Path('data/test')
 MODEL_ID = 'facebook/wav2vec2-large-xlsr-53'
 MODEL_PATH = 'models/wav2vec2-large-xlsr-53'
 BATCH_SIZE = 16
-NUM_EPOCHS = 2
+NUM_EPOCHS = 100
 
 print('Reading Data...', end='')
 train_data = pd.read_json(TRAIN_DATA_FOLDER / Path("10min.jsonl"), lines=True)  # .sort_values('duration')
@@ -52,10 +53,8 @@ PHONEM_PAD_TOKEN_ID = train_data_gen.data_processor.phn_pad_token_id
 POSTAGS_PAD_TOKEN_ID = train_data_gen.data_processor.postag_pad_token_id
 print('Done')
 
-print('Loading wer metric and tensorboard...', end='')
-wer_metric = load_metric("wer")
+print('Loading tensorboard...', end='')
 tb = SummaryWriter()
-
 print('Done')
 
 
@@ -64,6 +63,41 @@ def mean_pooling(token_embeddings):
     sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
     sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
     return sum_embeddings / sum_mask
+
+
+def levenshtein(seq1: List[str], seq2: List[str]) -> float:
+    size_x = len(seq1) + 1
+    size_y = len(seq2) + 1
+    matrix = np.zeros((size_x, size_y), dtype=np.int32)
+    for x in range(size_x):
+        matrix[x, 0] = x
+    for y in range(size_y):
+        matrix[0, y] = y
+    for x in range(1, size_x):
+        for y in range(1, size_y):
+            if seq1[x - 1] == seq2[y - 1]:
+                matrix[x, y] = min(
+                    matrix[x - 1, y] + 1,
+                    matrix[x - 1, y - 1],
+                    matrix[x, y - 1] + 1
+                )
+            else:
+                matrix[x, y] = min(
+                    matrix[x - 1, y] + 1,
+                    matrix[x - 1, y - 1] + 1,
+                    matrix[x, y - 1] + 1
+                )
+    return float(matrix[size_x - 1, size_y - 1])
+
+
+def wer(target, predicted):
+    error = []
+    for i in range(len(target)):
+        y_true = target[i].lower().split()
+        y_pred = predicted[i].lower().split()
+        error.append(levenshtein(y_true, y_pred) / len(y_true.split()))
+        res = np.array(error).mean()
+    return res
 
 
 class MultitaskWav2vecModel(nn.Module):
@@ -200,12 +234,13 @@ def test(model, device, data_generator, epoch):
             data, mask, labels = data.to(device), mask.to(device), labels
             logits = model(data,
                            mask)
-            logits = torch.argmax(logits, dim=-1)
+            logits = torch.argmax(logits, dim=-1).cpu().detach()
             pred_ids = data_generator.data_processor.decode_batch_predictions(logits)
             labels = labels[0]
+            labels[labels == -100] = CHAR_PAD_TOKEN_ID
             label_str = data_generator.data_processor.decode_batch_predictions(labels, group_tokens=False)
-            wer = wer_metric.compute(predictions=pred_ids, references=label_str)
-            running_wer += wer
+            word_error_rate = wer(pred_ids, label_str)
+            running_wer += word_error_rate
 
         tb.add_scalar('WER/test', running_wer / len(data_generator), epoch)
 
@@ -226,10 +261,9 @@ lr_scheduler = get_scheduler(name="linear",
 use_cuda = not torch.cuda.is_available()  # TODO remove 'not'
 device = torch.device('cuda' if use_cuda else 'cpu')
 
-# for epoch in range(1, NUM_EPOCHS + 1):
-#     train(multitask_wav2vec2, device, train_data_gen, epoch, lr_scheduler, optimizer, progress_bar)
-#     test(multitask_wav2vec2, device, train_data_gen, epoch)
-# tb.close()
+for epoch in range(1, NUM_EPOCHS + 1):
+    # train(multitask_wav2vec2, device, train_data_gen, epoch, lr_scheduler, optimizer, progress_bar)
+    test(multitask_wav2vec2, device, train_data_gen, epoch)
+tb.close()
 
 torch.save(multitask_wav2vec2.state_dict(), 'models/MultitaskWav2vec2')
-
