@@ -2,8 +2,10 @@ import random
 import warnings
 from pathlib import Path
 
+import logging
 import pandas as pd
 import torch
+import sys
 import torch.nn as nn
 from torch.optim import AdamW
 from tqdm.auto import tqdm
@@ -20,7 +22,18 @@ from russian_g2p.DataHandler import (DataGenerator,
                                      pos_tags,
                                      )
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+fmt_str = '%(filename)s[LINE:%(lineno)d]# %(levelname)-8s ' \
+          '[%(asctime)s]  %(message)s'
+formatter = logging.Formatter(fmt_str)
+stdout_handler = logging.StreamHandler(sys.stdout)
+logger.addHandler(stdout_handler)
+file_handler = logging.FileHandler('Multitask_Wav2Vec2_v1.log')
 warnings.filterwarnings("ignore")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 TRAIN_DATA_FOLDER = Path('data/train')
 TEST_DATA_FOLDER = Path('data/test')
@@ -29,16 +42,18 @@ MODEL_PATH = 'models/wav2vec2-large-xlsr-53'
 BATCH_SIZE = 16
 NUM_EPOCHS = 100
 
-print('Reading Data...', end='')
+# print('Reading Data...', end='')
+logger.info('Reading Data...')
 train_data = pd.read_json(TRAIN_DATA_FOLDER / Path("10min.jsonl"), lines=True)  # .sort_values('duration')
 test_data = pd.read_json(TEST_DATA_FOLDER / Path('crowd/manifest.jsonl'), lines=True)  # .sort_values('duration')
 test_data_len = max(len(test_data), len(train_data))
 test_data = test_data.sample(n=test_data_len)
 test_data = test_data[test_data['text'] != ' ']
 train_data = train_data[train_data['text'] != ' ']
-print('Done')
+# print('Done')
+logger.info('Done')
 
-print('Creating Data Generators...', end='')
+# print('Creating Data Generators...', end='')
 train_data_gen = DataGenerator(train_data,
                                batch_size=BATCH_SIZE,
                                train=True
@@ -51,11 +66,13 @@ test_data_gen = DataGenerator(test_data,
 CHAR_PAD_TOKEN_ID = train_data_gen.data_processor.char_pad_token_id
 PHONEM_PAD_TOKEN_ID = train_data_gen.data_processor.phn_pad_token_id
 POSTAGS_PAD_TOKEN_ID = train_data_gen.data_processor.postag_pad_token_id
-print('Done')
+# print('Done')
+logger.info('Created Generators')
 
-print('Loading tensorboard...', end='')
+# print('Loading tensorboard...', end='')
 tb = SummaryWriter()
-print('Done')
+# print('Done')
+logger.info('Loaded tensorboard')
 
 
 def mean_pooling(token_embeddings):
@@ -96,7 +113,7 @@ def wer(target, predicted):
         y_true = target[i].lower().split()
         y_pred = predicted[i].lower().split()
         error.append(levenshtein(y_true, y_pred) / len(y_true.split()))
-        res = np.array(error).mean()
+    res = np.array(error).mean()
     return res
 
 
@@ -216,19 +233,23 @@ def train(model, device, train_data_generator, epoch, lr_scheduler, optimizer, p
                              labels
                              )
         running_loss += loss.item()
+        info_msg = f'Epoch: {epoch} (Iteration: {i})'
+        logger.info(info_msg)
         loss.backward()
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()
         progress_bar.update(1)
     tb.add_scalar('Loss/train', running_loss / len(train_data_gen), epoch)
-    print(f'Epoch: {epoch}\tLoss:{running_loss / len(train_data_gen)}')
+    # print(f'Epoch: {epoch}\tLoss:{running_loss / len(train_data_gen)}')
+    logger.info(f'Loss on {epoch} epoch: {running_loss / len(train_data_gen)}')
 
 
 def test(model, device, data_generator, epoch):
     model.eval()
     running_wer = 0
     with torch.no_grad():
+        printed_results = []
         for i in trange(len(data_generator)):
             (data, mask), labels = data_generator[i]
             data, mask, labels = data.to(device), mask.to(device), labels
@@ -239,17 +260,28 @@ def test(model, device, data_generator, epoch):
             labels = labels[0]
             labels[labels == -100] = CHAR_PAD_TOKEN_ID
             label_str = data_generator.data_processor.decode_batch_predictions(labels, group_tokens=False)
+            printed_results.append(
+                (label_str,
+                 pred_ids)
+            )
             word_error_rate = wer(pred_ids, label_str)
             running_wer += word_error_rate
-
+        if len(printed_results) > 2:
+            printed_results = random.sample(printed_results, k=2)
+            for ground_truth, pred_str in printed_results:
+                info_msg = f'PREDICTED: {pred_str}\t' \
+                           f'TARGET: {ground_truth}'
+                logger.info(info_msg)
         tb.add_scalar('WER/test', running_wer / len(data_generator), epoch)
 
 
-print('Creating Model...', end='')
+# print('Creating Model...', end='')
 multitask_wav2vec2 = MultitaskWav2vecModel()
-print('Done')
+# print('Done')
+logger.info('Loaded Model')
 
 num_training_steps = NUM_EPOCHS * len(train_data_gen)
+logger.info(f'Num of training steps: {num_training_steps}')
 progress_bar = tqdm(range(num_training_steps))
 optimizer = AdamW(multitask_wav2vec2.parameters(), lr=5e-5)
 lr_scheduler = get_scheduler(name="linear",
@@ -260,10 +292,12 @@ lr_scheduler = get_scheduler(name="linear",
 
 use_cuda = not torch.cuda.is_available()  # TODO remove 'not'
 device = torch.device('cuda' if use_cuda else 'cpu')
+logger.info(f'Device: {device}')
 
 for epoch in range(1, NUM_EPOCHS + 1):
-    # train(multitask_wav2vec2, device, train_data_gen, epoch, lr_scheduler, optimizer, progress_bar)
+    train(multitask_wav2vec2, device, train_data_gen, epoch, lr_scheduler, optimizer, progress_bar)
     test(multitask_wav2vec2, device, train_data_gen, epoch)
 tb.close()
-
+logger.info('Saving model')
 torch.save(multitask_wav2vec2.state_dict(), 'models/MultitaskWav2vec2')
+logger.info('Done')
