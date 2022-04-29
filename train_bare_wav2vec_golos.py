@@ -1,36 +1,30 @@
-import os.path
-import random
-import warnings
-from pathlib import Path
-
 import argparse
 import logging
+import os.path
+import random
+import sys
+import time
+import warnings
+from pathlib import Path
+from typing import List
+
+import numpy as np
 import pandas as pd
 import torch
-import sys
-import torch.nn as nn
-from torch.optim import AdamW
-from tqdm.auto import tqdm
-from tqdm import trange
-from transformers import Wav2Vec2Model, Wav2Vec2ForCTC
-from transformers import get_scheduler
-from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
-from typing import List
-import numpy as np
-import random
-import time
-# 20.04.2022(22:50)
+from torch.utils.tensorboard import SummaryWriter
+from transformers import Wav2Vec2ForCTC
 
-from russian_g2p.DataHandler import (DataGenerator,
-                                     DataProcessor,
+from russian_g2p.DataHandler import (DataProcessor,
                                      DataCollator,
                                      GolosDataset
                                      )
 
+# 30.04.2022(00:01)
+
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
-tb = SummaryWriter()
+tb = SummaryWriter('runs/baseline-10h-multistep_lr-adamw-pkl')
 
 
 def levenshtein(seq1: List[str], seq2: List[str]) -> float:
@@ -78,15 +72,18 @@ def cer(predicted, target):
     return res
 
 
-def train(model, device, train_data_generator, epoch, optimizer):
+def train(model, device, train_dataloader, lr_scheduler, epoch, optimizer):
     model.train()
     running_loss = 0
     running_forward_time = 0
     running_data_gen_time = 0
-    for i in range(len(train_data_generator)):
-        start_gen = time.time()
-        (data, mask), labels = train_data_generator[i]
-        end_gen = time.time()
+    for i, batch in enumerate(train_dataloader):
+        start_loading_data = time.time()
+        data = batch['input_values']
+        mask = batch['attention_mask']
+        labels = batch['labels']
+        end_loading_data = time.time()
+
         data, mask, labels = data.to(device), mask.to(device), labels.to(device)
         start_forward = time.time()
         loss = model(
@@ -99,30 +96,36 @@ def train(model, device, train_data_generator, epoch, optimizer):
         del data, mask, labels
         tb.add_scalar('Loss/train', loss.item(), epoch)
         tb.add_scalar('Time/train/forward', float(end_forward - start_forward), epoch)
-        tb.add_scalar('Time/train/data gen', float(end_gen - start_gen), epoch)
+        # tb.add_scalar('Time/train/data gen', float(end_loading_data - start_loading_data), epoch)
         running_loss += loss.item()
-        running_data_gen_time += (end_gen - start_gen)
+        # running_data_gen_time += (end_loading_data - start_loading_data)
         running_forward_time += (end_forward - start_forward)
         info_msg = f'Epoch: {epoch} (Iteration: {i} with loss: {loss.item()}'
         logger.info(info_msg)
         loss.backward()
         optimizer.step()
-        # lr_scheduler.step()
         optimizer.zero_grad()
-    logger.info(f'Average forward time on {epoch} epoch: {running_forward_time / len(train_data_generator)}')
-    logger.info(f'Average data gen time on {epoch} epoch: {running_data_gen_time / len(train_data_generator)}')
-    logger.info(f'Average loss on {epoch} epoch: {running_loss / len(train_data_generator)}')
+    tb.add_scalar('Learning Rate', lr_scheduler.get_lr()[-1], epoch)
+    lr_scheduler.step()
+    tb.add_scalar('Average Loss/train', running_loss / len(train_dataloader), epoch)
+    logger.info(f'Average forward time on {epoch} epoch: {running_forward_time / len(train_dataloader)}')
+    # logger.info(f'Average data gen time on {epoch} epoch: {running_data_gen_time / len(train_dataloader)}')
+    logger.info(f'Average loss on {epoch} epoch: {running_loss / len(train_dataloader)}')
 
 
-def test(model, device, data_generator, epoch):
+def test(model, device, test_dataloader, processor, epoch):
     model.eval()
     running_wer = 0
     running_cer = 0
     running_loss = 0
     with torch.no_grad():
         printed_results = []
-        for i in trange(len(data_generator)):
-            (data, mask), labels = data_generator[i]
+        for i, batch in enumerate(test_dataloader):
+            # start_loading_data = time.time()
+            data = batch['input_values']
+            mask = batch['attention_mask']
+            labels = batch['labels']
+            # end_loading_data = time.time()
             data, mask = data.to(device), mask.to(device)
 
             w2v2_output = model(
@@ -136,9 +139,9 @@ def test(model, device, data_generator, epoch):
             tb.add_scalar('Loss/test', loss.item(), epoch)
             running_loss += loss.item()
             logits = torch.argmax(logits, dim=-1)
-            pred_ids = data_generator.processor.decode_batch_predictions(logits)
-            labels[labels == -100] = data_generator.data_processor.characters_char_map['<pad>']
-            label_str = data_generator.processor.decode_batch_predictions(labels, group_tokens=False)
+            pred_ids = processor.decode_batch_predictions(logits)
+            labels[labels == -100] = processor.characters_char_map['<pad>']
+            label_str = processor.decode_batch_predictions(labels, group_tokens=False)
 
             printed_results.append(
                 (label_str[0],
@@ -153,12 +156,13 @@ def test(model, device, data_generator, epoch):
             info_msg = ''
             for ground_truth, pred_str in printed_results:
                 info_msg += f'\nPREDICTED: {pred_str}\n' \
-                            f'TARGET: {ground_truth}'
+                            f'TARGET: {ground_truth}\n' \
+                            f'{"-" * 100}'
             logger.info(info_msg)
-        # tb.add_scalar('Loss/test', running_loss / len(data_generator), epoch)
-        logger.info(f'Test loss on {epoch} epoch: {running_loss / len(data_generator)}')
-        tb.add_scalar('WER/test', running_wer / len(data_generator), epoch)
-        tb.add_scalar('CER/test', running_cer / len(data_generator), epoch)
+        tb.add_scalar('Average Loss/test', running_loss / len(test_dataloader), epoch)
+        logger.info(f'Test loss on {epoch} epoch: {running_loss / len(test_dataloader)}')
+        tb.add_scalar('WER/test', running_wer / len(test_dataloader), epoch)
+        tb.add_scalar('CER/test', running_cer / len(test_dataloader), epoch)
 
 
 def main():
@@ -166,7 +170,7 @@ def main():
     parser.add_argument('data_folder', type=str)
     parser.add_argument('pretrained_wav2vec2_path', type=str)
     parser.add_argument('batch_size', type=int)
-    parser.add_argument('checkpoint_path', type=str)
+    # parser.add_argument('checkpoint_path', type=str)
     args = parser.parse_args()
 
     logger.info(f'Data folder: {args.data_folder}')
@@ -202,9 +206,10 @@ def main():
     )
     test_golos = GolosDataset(
         df=test_data,
-        data_path=Path(args.data_folder, 'test_pkl'),
+        data_path=Path(args.data_folder, 'test_pkl', 'crowd'),
         logger=logger
     )
+    logger.info('Creating dataloaders...')
     train_dataloader = DataLoader(
         train_golos,
         args.batch_size,
@@ -216,27 +221,6 @@ def main():
         args.batch_size,
         shuffle=False,
         collate_fn=datacollator
-    )
-
-    logger.info('Creating data generators...')
-    train_data_gen = DataGenerator(
-        train_data,
-        data_path=args.data_folder,
-        batch_size=args.batch_size,
-        processor=data_processor,
-        logger=logger,
-        train=True,
-        random_state=RANDOM_STATE
-    )
-
-    test_data_gen = DataGenerator(
-        test_data,
-        data_path=args.data_folder,
-        batch_size=args.batch_size,
-        processor=data_processor,
-        train=False,
-        logger=logger,
-        random_state=RANDOM_STATE
     )
 
     logger.info('Loading tensorboard')
@@ -257,39 +241,54 @@ def main():
         vocab_size=len(data_processor.processor.tokenizer),
         ctc_zero_infinity=True
     ).to(device)
+    # logger.info('Saving pretrained model')
+    # model.save_pretrained('models/wav2vec2-large-xlsr-53')
     model.gradient_checkpointing_enable()
-    # model.config.ctc_zero_infinity = True
     model.freeze_feature_extractor()
 
     logger.info(f'len of tokenizer: {len(data_processor.processor.tokenizer)}\n'
                 f'len of vocab_size: {len(data_processor.characters_char_map)}')
-    num_training_steps = NUM_EPOCHS * len(train_data_gen)
+    num_training_steps = NUM_EPOCHS * len(test_dataloader)
     logger.info(f'Num of training steps: {num_training_steps}')
-    # progress_bar = tqdm(range(num_training_steps))
 
     optimizer = torch.optim.AdamW(model.parameters())  # lr=1e-3
     # 0.3162 * 0.3162 = 0.1
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5, 10, 20, 40], gamma=0.3162)
-    checkpoint = torch.load(args.checkpoint_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    next_epoch = checkpoint['epoch'] + 1
-
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[100, 200, 300, 400], gamma=0.3162)
+    # checkpoint = torch.load(args.checkpoint_path)
+    # model.load_state_dict(checkpoint['model_state_dict'])
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # next_epoch = checkpoint['epoch'] + 1
+    next_epoch = 1
     for epoch in range(next_epoch, NUM_EPOCHS + next_epoch):
         logger.info(f'Start training on {epoch} epoch.')
-        train(model, device, train_data_gen, epoch, optimizer)
+        train(
+            model=model,
+            device=device,
+            train_dataloader=train_dataloader,
+            lr_scheduler=lr_scheduler,
+            epoch=epoch,
+            optimizer=optimizer
+        )
         logger.info(f'Start testing on {epoch} epoch.')
-        test(model, device, test_data_gen, epoch)
-        if epoch % 2 == 0:
+        test(
+            model=model,
+            device=device,
+            test_dataloader=test_dataloader,
+            processor=data_processor,
+            epoch=epoch
+        )
+        if epoch % 10 == 0:
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
+                'lr_scheduler_dict': lr_scheduler.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict()
             }, f'models/checkpoints/baseline/baseline_{epoch}_epoch')
     tb.close()
     logger.info('Saving model')
     torch.save({
         'model_state_dict': model.state_dict(),
+        'lr_scheduler_dict': lr_scheduler.state_dict(),
         'optimizer_state_dict': optimizer.state_dict()
     }, f'models/checkpoints/baseline/baseline_final')
     logger.info('Done')
@@ -302,7 +301,7 @@ if __name__ == '__main__':
     formatter = logging.Formatter(fmt_str)
     stdout_handler = logging.StreamHandler(sys.stdout)
     logger.addHandler(stdout_handler)
-    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v3.log')
+    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v4.log')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     main()
