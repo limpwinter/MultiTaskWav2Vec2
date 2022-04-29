@@ -4,4 +4,6 @@
 /jiwer/
 /models/
 /runs/
-/test.py
+/tests/
+/test.*
+*.json
