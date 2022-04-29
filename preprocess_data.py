@@ -1,23 +1,21 @@
+import argparse
 import logging
 import os
-from typing import List
-import pandas as pd
-
-import pickle
-from russian_g2p.DataHandler import DataProcessor
-import torchaudio
 import pathlib
-from pathlib import Path
-import warnings
-import torch
-from torch.utils.tensorboard import SummaryWriter
+import pickle
 import sys
-import argparse
-from tqdm import tqdm
+import warnings
+from pathlib import Path
+from typing import List
 
+import pandas as pd
+import torch
+import torchaudio
+
+from russian_g2p.DataHandler import DataProcessor
+# 29.04.2022 (17:52)
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
-tb = SummaryWriter()
 
 
 def preprocess_data(data_folder, new_data_path, data_processor, data: List):
@@ -29,7 +27,6 @@ def preprocess_data(data_folder, new_data_path, data_processor, data: List):
 
     wav_vile, sr = torchaudio.load(wav_abs_path)
     wav_vile = wav_vile.squeeze(0)
-    # old_name = wav_abs_path.name.split('.')[0]
     preprocessed_wav = data_processor.processor(
         wav_vile,
         sampling_rate=sr,
@@ -76,18 +73,24 @@ def main():
     new_train_data_path.mkdir(parents=True, exist_ok=True)
 
     data_processor = DataProcessor()
-
-    for row in tqdm(train_data.values):
+    logger.info('Start train data preprocessing')
+    for i, row in enumerate(train_data.values):
+        if i % 50 == 0:
+            info_msg = f'Train preprocessing is {(float(i) / len(train_data)) * 100:.1f}% complete.'
+            logger.info(info_msg)
         preprocessed_data = preprocess_data(train_data_path, new_train_data_path, data_processor, row)
         with open(preprocessed_data['path_to_save'], 'wb') as f:
             pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
         # save_data(preprocessed_data)
 
-    # for row in tqdm(test_data.values):
-    #     preprocessed_data = preprocess_data(test_data_path, new_test_data_path, data_processor, row)
-    #     with open(preprocessed_data['path_to_save'], 'wb') as f:
-    #         pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    #     # save_data(preprocessed_data)
+    for i, row in enumerate(test_data.values):
+        if i % 50 == 0:
+            info_msg = f'Test preprocessing is {(float(i) / len(test_data)) * 100:.1f}% complete.'
+            logger.info(info_msg)
+        preprocessed_data = preprocess_data(test_data_path, new_test_data_path, data_processor, row)
+        with open(preprocessed_data['path_to_save'], 'wb') as f:
+            pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        # save_data(preprocessed_data)
 
 
 if __name__ == '__main__':
