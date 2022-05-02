@@ -13,13 +13,14 @@ import torch
 import torchaudio
 
 from russian_g2p.DataHandler import DataProcessor
-# 29.04.2022 (17:52)
+
+# 01.05.2022 (15:20)
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
 
 
 def preprocess_data(data_folder, new_data_path, data_processor, data: List):
-    _, path, text, _ = data
+    _, path, text, duration = data
 
     wav_abs_path = pathlib.Path(data_folder, path)
     pkl_abs_path = Path(new_data_path, path)
@@ -51,8 +52,11 @@ def preprocess_data(data_folder, new_data_path, data_processor, data: List):
     sentence_embeddings = mean_pooling(output)[0]
     result = {
         'path_to_save': new_data_path,
-        'data': preprocessed_wav,
-        'embedding': sentence_embeddings}
+        'input_values': preprocessed_wav,
+        'sentence_embeddings': sentence_embeddings,
+        'text': text,
+        'duration': duration
+    }
     return result
 
 
@@ -61,7 +65,7 @@ def main():
     parser.add_argument('data_folder', type=str)
 
     args = parser.parse_args()
-    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10min.jsonl'), lines=True)
+    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10hours.jsonl'), lines=True)
     test_data = pd.read_json(os.path.join(args.data_folder, 'test', 'crowd', 'manifest.jsonl'), lines=True)
 
     train_data_path = Path(args.data_folder, 'train')

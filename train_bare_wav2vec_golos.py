@@ -20,7 +20,7 @@ from russian_g2p.DataHandler import (DataProcessor,
                                      GolosDataset
                                      )
 
-# 30.04.2022(00:01)
+# 01.05.2022 (15:20)
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -77,11 +77,13 @@ def train(model, device, train_dataloader, lr_scheduler, epoch, optimizer):
     running_loss = 0
     running_forward_time = 0
     running_data_gen_time = 0
-    for i, batch in enumerate(train_dataloader):
+    iterable_dataloder = iter(train_dataloader)
+    for idx in range(len(train_dataloader)):
         start_loading_data = time.time()
+        batch = next(iterable_dataloder)
         data = batch['input_values']
         mask = batch['attention_mask']
-        labels = batch['labels']
+        labels = batch['char_labels']
         end_loading_data = time.time()
 
         data, mask, labels = data.to(device), mask.to(device), labels.to(device)
@@ -95,21 +97,22 @@ def train(model, device, train_dataloader, lr_scheduler, epoch, optimizer):
 
         del data, mask, labels
         tb.add_scalar('Loss/train', loss.item(), epoch)
-        tb.add_scalar('Time/train/forward', float(end_forward - start_forward), epoch)
-        # tb.add_scalar('Time/train/data gen', float(end_loading_data - start_loading_data), epoch)
+        tb.add_scalar('Time/forward/train', float(end_forward - start_forward), epoch)
+        tb.add_scalar('Time/data gen/train', float(end_loading_data - start_loading_data), epoch)
         running_loss += loss.item()
-        # running_data_gen_time += (end_loading_data - start_loading_data)
+        running_data_gen_time += (end_loading_data - start_loading_data)
         running_forward_time += (end_forward - start_forward)
-        info_msg = f'Epoch: {epoch} (Iteration: {i} with loss: {loss.item()}'
+        info_msg = f'Epoch: {epoch} (Iteration: {idx} with loss: {loss.item()}'
         logger.info(info_msg)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-    tb.add_scalar('Learning Rate', lr_scheduler.get_lr()[-1], epoch)
     lr_scheduler.step()
+    tb.add_scalar('Learning Rate', lr_scheduler.get_lr()[-1], epoch)
     tb.add_scalar('Average Loss/train', running_loss / len(train_dataloader), epoch)
+
     logger.info(f'Average forward time on {epoch} epoch: {running_forward_time / len(train_dataloader)}')
-    # logger.info(f'Average data gen time on {epoch} epoch: {running_data_gen_time / len(train_dataloader)}')
+    logger.info(f'Average data gen time on {epoch} epoch: {running_data_gen_time / len(train_dataloader)}')
     logger.info(f'Average loss on {epoch} epoch: {running_loss / len(train_dataloader)}')
 
 
@@ -118,25 +121,35 @@ def test(model, device, test_dataloader, processor, epoch):
     running_wer = 0
     running_cer = 0
     running_loss = 0
+    running_forward_time = 0
+    running_data_gen_time = 0
+    iterable_dataloder = iter(test_dataloader)
     with torch.no_grad():
         printed_results = []
-        for i, batch in enumerate(test_dataloader):
-            # start_loading_data = time.time()
+        for idx in range(len(test_dataloader)):
+            start_loading_data = time.time()
+            batch = next(iterable_dataloder)
             data = batch['input_values']
             mask = batch['attention_mask']
-            labels = batch['labels']
-            # end_loading_data = time.time()
+            labels = batch['char_labels']
+            end_loading_data = time.time()
+
             data, mask = data.to(device), mask.to(device)
 
+            start_forward_time = time.time()
             w2v2_output = model(
                 data,
                 mask,
                 labels=labels.to(device)
             )
+            end_forward_time = time.time()
+
             logits = w2v2_output.logits.detach().cpu()
             loss = w2v2_output.loss
             del w2v2_output, data, mask
             tb.add_scalar('Loss/test', loss.item(), epoch)
+            tb.add_scalar('Time/data gen/test', float(end_loading_data - start_loading_data))
+            tb.add_scalar('Time/forward/test', float(end_forward_time - start_forward_time))
             running_loss += loss.item()
             logits = torch.argmax(logits, dim=-1)
             pred_ids = processor.decode_batch_predictions(logits)
@@ -148,6 +161,8 @@ def test(model, device, test_dataloader, processor, epoch):
                  pred_ids[0])
             )
             word_error_rate = wer(pred_ids, label_str)
+            running_forward_time += float(end_forward_time - start_forward_time)
+            running_data_gen_time += float(end_loading_data - start_loading_data)
             char_error_rate = cer(pred_ids, label_str)
             running_wer += word_error_rate
             running_cer += char_error_rate
@@ -159,10 +174,16 @@ def test(model, device, test_dataloader, processor, epoch):
                             f'TARGET: {ground_truth}\n' \
                             f'{"-" * 100}'
             logger.info(info_msg)
-        tb.add_scalar('Average Loss/test', running_loss / len(test_dataloader), epoch)
-        logger.info(f'Test loss on {epoch} epoch: {running_loss / len(test_dataloader)}')
+        tb.add_scalar(
+            'Average Loss/test', running_loss / len(test_dataloader), epoch)
         tb.add_scalar('WER/test', running_wer / len(test_dataloader), epoch)
         tb.add_scalar('CER/test', running_cer / len(test_dataloader), epoch)
+        logger.info(
+            f'Test loss on {epoch} epoch: {running_loss / len(test_dataloader)}')
+        logger.info(
+            f'Average forward time during test on {epoch} epoch: {running_forward_time / len(test_dataloader)}')
+        logger.info(
+            f'Average data gen time during test on {epoch} epoch: {running_data_gen_time / len(test_dataloader)}')
 
 
 def main():
@@ -261,22 +282,10 @@ def main():
     next_epoch = 1
     for epoch in range(next_epoch, NUM_EPOCHS + next_epoch):
         logger.info(f'Start training on {epoch} epoch.')
-        train(
-            model=model,
-            device=device,
-            train_dataloader=train_dataloader,
-            lr_scheduler=lr_scheduler,
-            epoch=epoch,
-            optimizer=optimizer
-        )
+        train(model=model, device=device, train_dataloader=train_dataloader, lr_scheduler=lr_scheduler, epoch=epoch,
+              optimizer=optimizer)
         logger.info(f'Start testing on {epoch} epoch.')
-        test(
-            model=model,
-            device=device,
-            test_dataloader=test_dataloader,
-            processor=data_processor,
-            epoch=epoch
-        )
+        test(model=model, device=device, test_dataloader=test_dataloader, processor=data_processor, epoch=epoch)
         if epoch % 10 == 0:
             torch.save({
                 'epoch': epoch,
@@ -301,7 +310,7 @@ if __name__ == '__main__':
     formatter = logging.Formatter(fmt_str)
     stdout_handler = logging.StreamHandler(sys.stdout)
     logger.addHandler(stdout_handler)
-    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v4.log')
+    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v5.log')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     main()
