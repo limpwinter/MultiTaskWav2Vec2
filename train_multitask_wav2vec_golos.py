@@ -12,19 +12,21 @@ from jiwer import cer, wer
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from transformers import Wav2Vec2Model
 from MultitaskWav2vec2 import MultitaskWav2vecModel
-from russian_g2p.DataHandler import (DataGenerator,
-                                     DataProcessor
+from russian_g2p.DataHandler import (DataProcessor,
+                                     GolosDataset,
+                                     DataCollator
                                      )
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
-tb = SummaryWriter('runs/multitask-10h-multistep_lr-adamw-pkl-no_sent')
+tb = SummaryWriter('runs/multitask-10min-multistep_lr-adamw-pkl-no_sent')
 
 
 def mean_pooling(token_embeddings):
@@ -34,100 +36,70 @@ def mean_pooling(token_embeddings):
     return sum_embeddings / sum_mask
 
 
-# def levenshtein(seq1: List[str], seq2: List[str]) -> float:
-#     size_x = len(seq1) + 1
-#     size_y = len(seq2) + 1
-#     matrix = np.zeros((size_x, size_y), dtype=np.int32)
-#     for x in range(size_x):
-#         matrix[x, 0] = x
-#     for y in range(size_y):
-#         matrix[0, y] = y
-#     for x in range(1, size_x):
-#         for y in range(1, size_y):
-#             if seq1[x - 1] == seq2[y - 1]:
-#                 matrix[x, y] = min(
-#                     matrix[x - 1, y] + 1,
-#                     matrix[x - 1, y - 1],
-#                     matrix[x, y - 1] + 1
-#                 )
-#             else:
-#                 matrix[x, y] = min(
-#                     matrix[x - 1, y] + 1,
-#                     matrix[x - 1, y - 1] + 1,
-#                     matrix[x, y - 1] + 1
-#                 )
-#     return float(matrix[size_x - 1, size_y - 1])
-#
-#
-# def wer(predicted, target):
-#     error = []
-#     for i in range(len(target)):
-#         y_true = target[i].split()
-#         y_pred = predicted[i].split()
-#         error.append(levenshtein(y_true, y_pred) / len(y_true))
-#     res = np.array(error).mean()
-#     return res
-#
-#
-# def cer(predicted, target):
-#     error = []
-#     for i in range(len(target)):
-#         y_true = target[i]
-#         y_pred = predicted[i]
-#         error.append(levenshtein(y_true, y_pred) / len(y_true))
-#     res = np.array(error).mean()
-#     return res
-
-
 def train(model, device, train_dataloader, epoch, lr_scheduler, optimizer):
     model.train()
     running_loss = 0
     running_char_loss = 0
     running_pos_tags_loss = 0
-    running_sent_emb_loss = 0
-    for i, batch in enumerate(train_dataloader):
-        # start_loading_data = time.time()
+    running_phonem_loss = 0
+    # running_sent_emb_loss = 0
+    iterable_dataloder = iter(train_dataloader)
+    n = len(train_dataloader)
+    for idx in range(len(train_dataloader)):
+        start_loading_time = time.time()
+        batch = next(iterable_dataloder)
         batch = {k: v.to(device) for k, v in batch.items()}
         data = batch['input_values']
         mask = batch['attention_mask']
+        pos_tag_labels = batch['pos_tag_labels']
+        char_labels = batch['char_labels']
+        phonem_labels = batch['phonem_labels']
         # sent_emb_labels = batch['sentence_embedding']
-        pos_tags_labels = batch['pos_tags_labels']
-        char_labels = batch['labels']
+        end_loading_time = time.time()
 
-        data, mask = data.to(device), mask.to(device)
-        char_labels, pos_tags_labels, sent_emb_labels = char_labels.to(device), pos_tags_labels.to(
-            device), sent_emb_labels.to(device)
-        labels = char_labels, pos_tags_labels, sent_emb_labels
-        start_forward = time.time()
+        labels = {'char_labels': char_labels,
+                  'phonem_labels': phonem_labels,
+                  'pos_tag_labels': pos_tag_labels}
+
+        start_forward_time = time.time()
         logits, losses = model(data,
-                               mask,
-                               labels
+                               attention_mask=mask,
+                               labels=labels
                                )
-        end_forward = time.time()
+        end_forward_time = time.time()
 
-        del data, mask, char_labels, pos_tags_labels, sent_emb_labels
-        char_loss, pos_tags_loss, sent_emb_loss = losses
-        loss = char_loss + pos_tags_loss + sent_emb_loss
+        del data, mask, char_labels, pos_tag_labels, phonem_labels
+
+        char_loss = losses['char_loss']
+        pos_tags_loss = losses['pos_tag_loss']
+        phonem_loss = losses['phonem_loss']
+        loss = char_loss + pos_tags_loss + phonem_loss
+
         running_loss += loss.item()
-        tb.add_scalar('Loss/train/overall', loss.item(), epoch)
-        tb.add_scalar('Loss/train/character', char_loss.item(), epoch)
-        tb.add_scalar('loss/train/pos_tags', pos_tags_loss.item(), epoch)
-        tb.add_scalar('Loss/train/sent_embedding', sent_emb_loss, epoch)
-        tb.add_scalar('Time/train/forward', float(end_forward - start_forward), epoch)
         running_char_loss += char_loss.item()
         running_pos_tags_loss += pos_tags_loss.item()
-        running_sent_emb_loss += sent_emb_loss.item()
-        info_msg = f'Epoch: {epoch} (Iteration: {i} with loss: {loss.item()})'
+        running_phonem_loss += phonem_loss.item()
+        # running_sent_emb_loss += sent_emb_loss.item()
+        info_msg = f'Epoch: {epoch} (Iteration: {idx} with loss: {loss.item()})'
         logger.info(info_msg)
+
+        tb.add_scalar('Loss/overall/train', loss.item(), epoch * n + idx)
+        tb.add_scalar('Loss/character/train', char_loss.item(), epoch * n + idx)
+        tb.add_scalar('Loss/pos_tags/train', pos_tags_loss.item(), epoch * n + idx)
+        tb.add_scalar('Loss/phonems/train', phonem_loss.item(), epoch * n + idx)
+        # tb.add_scalar('Loss/sent_embedding/train', sent_emb_loss.item(), epoch * n + idx)
+        tb.add_scalar('Time/forward/train', float(end_forward_time - start_forward_time), epoch * n + idx)
+        tb.add_scalar('Time/data gen/train', float(end_loading_time - start_loading_time), epoch * n + idx)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
     tb.add_scalar('Learning Rate', lr_scheduler.get_lr()[-1], epoch)
     lr_scheduler.step()
-    tb.add_scalar('Average Loss/train/characters', running_char_loss / len(train_dataloader), epoch)
-    tb.add_scalar('Average Loss/train/POS Tags', running_pos_tags_loss / len(train_dataloader), epoch)
-    tb.add_scalar('Average Loss/train/sentence_embeddings', running_sent_emb_loss / len(train_dataloader), epoch)
-    tb.add_scalar('Average Loss/train/overall', running_loss / len(train_dataloader), epoch)
+    tb.add_scalar('Average Loss/characters/train', running_char_loss / len(train_dataloader), epoch)
+    tb.add_scalar('Average Loss/POS Tags/train', running_pos_tags_loss / len(train_dataloader), epoch)
+    # tb.add_scalar('Average Loss/sentence_embeddings/train', running_sent_emb_loss / len(train_dataloader), epoch)
+    tb.add_scalar('Average Loss/phonems/train', running_phonem_loss / len(train_dataloader), epoch)
+    tb.add_scalar('Average Loss/overall/train', running_loss / len(train_dataloader), epoch)
     logger.info(f'Average loss on {epoch} epoch: {running_loss / len(train_dataloader)}')
 
 
@@ -138,61 +110,86 @@ def test(model, device, test_dataloader, processor, epoch):
     running_loss = 0
     running_char_loss = 0
     running_pos_tags_loss = 0
-    running_sent_emb_loss = 0
+    running_phonem_loss = 0
+    # running_sent_emb_loss = 0
+    running_data_gen_time = 0
+    running_forward_time = 0
+    iterable_dataloder = iter(test_dataloader)
+    n = len(test_dataloader)
     with torch.no_grad():
         printed_results = []
-        for i, batch in enumerate(test_dataloader):
-            # (data, mask), (char_labels, pos_tags_labels, sent_emb_labels) = test_dataloader[i]
+        for idx in range(len(test_dataloader)):
+            start_loading_time = time.time()
+            batch = next(iterable_dataloder)
+            batch = {k: v.to(device) for k, v in batch.items()}
             data = batch['input_values']
             mask = batch['attention_mask']
-            sent_emb_labels = batch['sentence_embeddings']
-            pos_tags_labels = batch['pos_tags']
-            char_labels = batch['labels']
+            pos_tag_labels = batch['pos_tag_labels']
+            char_labels = batch['char_labels']
+            phonem_labels = batch['phonem_labels']
+            # sent_emb_labels = batch['sentence_embedding']
+            end_loading_time = time.time()
 
-            data, mask = data.to(device), mask.to(device)
-            char_labels, = char_labels.to(device)
-            pos_tags_labels = pos_tags_labels.to(device)
-            sent_emb_labels = sent_emb_labels.to(device)
-            labels = char_labels, pos_tags_labels, sent_emb_labels
+            labels = {'char_labels': char_labels,
+                      'phonem_labels': phonem_labels,
+                      'pos_tag_labels': pos_tag_labels}
 
-            logits, losses = model(
-                data,
-                mask,
-                labels
-            )
+            start_forward_time = time.time()
+            logits, losses = model(data,
+                                   attention_mask=mask,
+                                   labels=labels
+                                   )
+            end_forward_time = time.time()
 
-            del data, mask, pos_tags_labels, sent_emb_labels
-            char_loss, pos_tags_loss, sent_emb_loss = losses
-            loss = char_loss + pos_tags_loss + sent_emb_loss
-            tb.add_scalar('Loss/test/overall', loss.item(), epoch)
-            tb.add_scalar('Loss/test/character', char_loss.item(), epoch)
-            tb.add_scalar('loss/test/pos_tags', pos_tags_loss.item(), epoch)
-            tb.add_scalar('Loss/test/sent_embedding', sent_emb_loss, epoch)
+            del data, mask, pos_tag_labels, phonem_labels
+            char_loss = losses['char_loss']
+            pos_tags_loss = losses['pos_tag_loss']
+            phonem_loss = losses['phonem_loss']
+            loss = char_loss + pos_tags_loss + phonem_loss
             running_loss += loss.item()
             running_char_loss += char_loss.item()
             running_pos_tags_loss += pos_tags_loss.item()
-            running_sent_emb_loss += sent_emb_loss.item()
+            running_phonem_loss += phonem_loss.item()
+            # running_sent_emb_loss += sent_emb_loss.item()
+
+            tb.add_scalar('Time/data gen/test', float(end_loading_time - start_loading_time), epoch * n + idx)
+            tb.add_scalar('Time/forward/test', float(end_forward_time - start_forward_time), epoch * n + idx)
+
             logits = torch.argmax(logits, dim=-1).cpu().detach()
-            pred_ids = test_dataloader.data_processor.decode_batch_predictions(logits)
-            char_labels[char_labels == -100] = test_dataloader.data_processor.characters_char_map['<pad>']
-            label_str = test_dataloader.data_processor.decode_batch_predictions(char_labels, group_tokens=False)
+            pred_ids = processor.decode_batch_predictions(logits)
+            char_labels[char_labels == -100] = processor.characters_char_map['<pad>']
+            label_str = processor.decode_batch_predictions(char_labels, group_tokens=False)
             printed_results.append(
-                (label_str,
-                 pred_ids)
+                (label_str[0],
+                 pred_ids[0])
             )
             word_error_rate = wer(pred_ids, label_str)
             char_error_rate = cer(pred_ids, label_str)
             running_cer += char_error_rate
             running_wer += word_error_rate
+            running_forward_time += float(end_forward_time - start_forward_time)
+            running_data_gen_time += float(end_loading_time - start_loading_time)
+
         if len(printed_results) > 5:
             printed_results = random.sample(printed_results, k=5)
             info_msg = ''
             for ground_truth, pred_str in printed_results:
                 info_msg += f'\nPREDICTED: {pred_str}\n' \
-                            f'TARGET: {ground_truth}'
+                            f'TARGET: {ground_truth}' \
+                            f'{"-" * 100}'
             logger.info(info_msg)
         tb.add_scalar('WER/test', running_wer / len(test_dataloader), epoch)
         tb.add_scalar('CER/test', running_cer / len(test_dataloader), epoch)
+        tb.add_scalar('Average Loss/overall/test', running_loss / n, epoch)
+        tb.add_scalar('Average Loss/character/test', running_char_loss / n, epoch)
+        tb.add_scalar('Average Loss/pos_tags/test', running_pos_tags_loss / n, epoch)
+        tb.add_scalar('Average Loss/phonems/test', running_phonem_loss / n, epoch)
+        logger.info(
+            f'Average test loss on {epoch} epoch: {running_loss / n}')
+        logger.info(
+            f'Average forward time during test on {epoch} epoch: {running_forward_time / n}')
+        logger.info(
+            f'Average data gen time during test on {epoch} epoch: {running_data_gen_time / n}')
 
 
 def main():
@@ -213,7 +210,7 @@ def main():
     np.random.seed(RANDOM_STATE)
 
     logger.info('Reading Data...')
-    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10hours.jsonl'), lines=True)
+    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10min.jsonl'), lines=True)
     test_data = pd.read_json(os.path.join(args.data_folder, 'test', 'crowd', 'manifest.jsonl'), lines=True)
     test_data = test_data[test_data['text'] != ' ']
     train_data = train_data[train_data['text'] != ' ']
@@ -268,7 +265,8 @@ def main():
                                                ).to(device)
     #
     # multitask_wav2vec2.load_state_dict(torch.load('models/checkpoints/MultitaskWav2vec_35_epoch'))
-    num_training_steps = NUM_EPOCHS * len(train_data_gen)
+
+    num_training_steps = NUM_EPOCHS * len(train_dataloader)
     logger.info(f'Num of training steps: {num_training_steps}')
     # progress_bar = tqdm(range(num_training_steps))
     optimizer = AdamW(multitask_wav2vec2.parameters())
@@ -288,7 +286,7 @@ def main():
         )
         logger.info(f'Start testing on {epoch} epoch.')
         test(
-            model=model,
+            model=multitask_wav2vec2,
             device=device,
             test_dataloader=test_dataloader,
             processor=data_processor,
