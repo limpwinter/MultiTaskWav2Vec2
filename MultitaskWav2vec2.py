@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers import Wav2Vec2Model
 
 from russian_g2p.DataHandler import DataProcessor
-
+# 11.05.2022 (23:24)
 config = {
     "tdnn_dilation": [
         1,
@@ -88,26 +88,29 @@ class MultitaskWav2vecModel(nn.Module):
                 attention_mask,
                 labels=None
                 ):
-        w2v2_output = self.wav2vec2(input_values, attention_mask)
+        w2v2_output = self.wav2vec2(
+            input_values,
+            attention_mask
+        )
         hidden_states = w2v2_output.hidden_states
         hs_len = len(hidden_states)
 
-        hs_0 = hidden_states[2]  # lowest level features 0
-        hs_1 = hidden_states[hs_len // 3 - 1]  # low level features 7
-        hs_2 = hidden_states[(hs_len * 2) // 3 - 1]  # middle level features 15
+        hs_0 = hidden_states[2]  # lowest level features 2 (phonems)
+        hs_1 = hidden_states[10]  # low level features 10 pos_tags
+        # hs_2 = hidden_states[(hs_len * 2) // 3 - 1]  # middle level features 15
         hs_3 = hidden_states[(hs_len * 3) // 3 - 1]  # high level features 23
 
         # logits = []
         hs_0 = self.dp0(hs_0)
-        head_0_logits = self.fc0(hs_0)  # sentence embedding recognition head
+        head_0_logits = self.fc0(hs_0)  # phonemes recognition head
         # logits.append(head_0_logits)
 
         hs_1 = self.dp1(hs_1)
         head_1_logits = self.fc1(hs_1)  # part of speech tags recognition head
         # logits.append(head_1_logits)
 
-        hs_2 = self.dp2(hs_2)
-        head_2_logits = self.fc2(hs_2)  # phonems recognition head
+        # hs_2 = self.dp2(hs_2)
+        # head_2_logits = self.fc2(hs_2)  # phonems recognition head
         # logits.append(head_2_logits)
 
         hs_3 = self.dp3(hs_3)
@@ -146,11 +149,11 @@ class MultitaskWav2vecModel(nn.Module):
         if labels is not None:
             chars_labels = labels['char_labels']
             pos_tags_labels = labels['pos_tag_labels']
-            # sentences_embeddings = labels['sentence_embedding']
             phonems_labels = labels['phonem_labels']
+            # sentences_embeddings = labels['sentence_embedding']
 
             char_loss = compute_ctc_loss(chars_labels, head_3_logits, self.characters['<pad>'], attention_mask)
-            phonem_loss = compute_ctc_loss(phonems_labels, head_2_logits, self.phonems['<pad>'], attention_mask)
+            phonem_loss = compute_ctc_loss(phonems_labels, head_0_logits, self.phonems['<pad>'], attention_mask)
             pos_tag_loss = compute_ctc_loss(pos_tags_labels, head_1_logits, self.pos_tags['<pad>'], attention_mask)
 
             # sent_embedding = mean_pooling(head_0_logits)

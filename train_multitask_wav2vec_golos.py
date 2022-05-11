@@ -23,10 +23,19 @@ from russian_g2p.DataHandler import (DataProcessor,
                                      GolosDataset,
                                      DataCollator
                                      )
+# 11.05.2022 (23:24)
 
+'''
+ver 0:
+no loss weight
+no sent emb loss
+2-phonems
+10-pos tags
+23-chars
+'''
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
-tb = SummaryWriter('runs/multitask-10min-multistep_lr-adamw-pkl-no_sent')
+tb = SummaryWriter('runs/multitask-10min-multistep_lr-adamw-pkl-no_sent_v0')
 
 
 def mean_pooling(token_embeddings):
@@ -163,8 +172,8 @@ def test(model, device, test_dataloader, processor, epoch):
                 (label_str[0],
                  pred_ids[0])
             )
-            word_error_rate = wer(pred_ids, label_str)
-            char_error_rate = cer(pred_ids, label_str)
+            word_error_rate = wer(label_str, pred_ids)
+            char_error_rate = cer(label_str, pred_ids)
             running_cer += char_error_rate
             running_wer += word_error_rate
             running_forward_time += float(end_forward_time - start_forward_time)
@@ -210,7 +219,7 @@ def main():
     np.random.seed(RANDOM_STATE)
 
     logger.info('Reading Data...')
-    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10min.jsonl'), lines=True)
+    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10hours.jsonl'), lines=True)
     test_data = pd.read_json(os.path.join(args.data_folder, 'test', 'crowd', 'manifest.jsonl'), lines=True)
     test_data = test_data[test_data['text'] != ' ']
     train_data = train_data[train_data['text'] != ' ']
@@ -320,7 +329,7 @@ if __name__ == '__main__':
     formatter = logging.Formatter(fmt_str)
     stdout_handler = logging.StreamHandler(sys.stdout)
     logger.addHandler(stdout_handler)
-    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v1.log')
+    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v0.log')
 
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
