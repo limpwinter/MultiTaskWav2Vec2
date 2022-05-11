@@ -22,7 +22,7 @@ from russian_g2p.Grapheme2Phoneme import Grapheme2Phoneme
 
 accentor = Accentor()
 transcriptor = Grapheme2Phoneme()
-# 03.05.2022 (12:03)
+# 10.05.2022 (13:36)
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
 
@@ -43,7 +43,8 @@ def get_phonems(text: str):
 
     # ставим ударения и заменяем "сломанные" слова
     accented = accentor.do_accents(text)[0]
-    accented = [word.replace('+', '') if word.count('+') > 1 else word for word in accented]
+
+    accented = [word.replace('+', '').split()[0] if word.count('+') > 1 else word for word in accented]
 
     # создаем и кодируем транскрипции
     transcription = [transcriptor.word_to_phonemes(elem) for elem in accented]
@@ -123,8 +124,10 @@ def main():
     parser.add_argument('data_folder', type=str)
 
     args = parser.parse_args()
-    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10min.jsonl'), lines=True)
+    train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10hours.jsonl'), lines=True)
     test_data = pd.read_json(os.path.join(args.data_folder, 'test', 'crowd', 'manifest.jsonl'), lines=True)
+    test_data = test_data[test_data['text'] != ' ']
+    train_data = train_data[train_data['text'] != ' ']
 
     train_data_path = Path(args.data_folder, 'train')
     new_train_data_path = Path(args.data_folder, 'train_pkl')
@@ -139,19 +142,31 @@ def main():
     for i, row in enumerate(train_data.values):
         if i % 50 == 0:
             info_msg = f'Train preprocessing is {(float(i) / len(train_data)) * 100:.1f}% complete.'
-            logger.info(info_msg)
+            # logger.info(info_msg)
+            print(info_msg)
+        _, path, _, _ = row
+        pkl_abs_path = Path(new_train_data_path, path)
+        new_data_path = pathlib.Path(pkl_abs_path).with_suffix('.pkl')
+        if new_data_path.exists():
+            continue
         preprocessed_data = preprocess_data(train_data_path, new_train_data_path, data_processor, row)
         with open(preprocessed_data['path_to_save'], 'wb') as f:
             pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-        # save_data(preprocessed_data)
+    # save_data(preprocessed_data)
 
-    # for i, row in enumerate(test_data.values):
-    #     if i % 50 == 0:
-    #         info_msg = f'Test preprocessing is {(float(i) / len(test_data)) * 100:.1f}% complete.'
-    #         logger.info(info_msg)
-    #     preprocessed_data = preprocess_data(test_data_path, new_test_data_path, data_processor, row)
-    # with open(preprocessed_data['path_to_save'], 'wb') as f:
-    #     pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    for i, row in enumerate(test_data.values):
+        if i % 50 == 0:
+            info_msg = f'Test preprocessing is {(float(i) / len(test_data)) * 100:.1f}% complete.'
+            # logger.info(info_msg)
+            print(info_msg)
+        _, path, text, duration = row
+        pkl_abs_path = Path(new_test_data_path, path)
+        new_data_path = pathlib.Path(pkl_abs_path).with_suffix('.pkl')
+        if new_data_path.exists():
+            continue
+        preprocessed_data = preprocess_data(test_data_path, new_test_data_path, data_processor, row)
+        with open(preprocessed_data['path_to_save'], 'wb') as f:
+            pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
     # save_data(preprocessed_data)
     # vocab_path = Path(args.data_folder, 'vocabs')
     # vocab_path.mkdir(parents=True, exist_ok=True)
