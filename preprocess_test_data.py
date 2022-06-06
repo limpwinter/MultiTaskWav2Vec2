@@ -107,7 +107,7 @@ def preprocess_data(data_folder, new_folder_path, data_processor, data: List):
     ).input_ids[0]
     # Perform pooling. In this case, mean pooling
     result = {
-        'path_to_save': new_data_path,
+        'path_to_save': str(new_data_path.resolve()),
         'input_values': preprocessed_wav,
         'text': text,
         'characters': char_labels,
@@ -139,19 +139,19 @@ def main():
 
     data_processor = DataProcessor()
     logger.info('Start train data preprocessing')
-    for i, row in enumerate(train_data.values):
-        if i % 50 == 0:
-            info_msg = f'Train preprocessing is {(float(i) / len(train_data)) * 100:.1f}% complete.'
-            # logger.info(info_msg)
-            print(info_msg)
-        _, path, _, _ = row
-        pkl_abs_path = Path(new_train_data_path, path)
-        new_data_path = pathlib.Path(pkl_abs_path).with_suffix('.pkl')
-        if new_data_path.exists():
-            continue
-        preprocessed_data = preprocess_data(train_data_path, new_train_data_path, data_processor, row)
-        with open(preprocessed_data['path_to_save'], 'wb') as f:
-            pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # for i, row in enumerate(train_data.values):
+    #     if i % 50 == 0:
+    #         info_msg = f'Train preprocessing is {(float(i) / len(train_data)) * 100:.1f}% complete.'
+    #         # logger.info(info_msg)
+    #         print(info_msg)
+    #     _, path, _, _ = row
+    #     pkl_abs_path = Path(new_train_data_path, path)
+    #     new_data_path = pathlib.Path(pkl_abs_path).with_suffix('.pkl')
+    #     if new_data_path.exists():
+    #         continue
+    #     preprocessed_data = preprocess_data(train_data_path, new_train_data_path, data_processor, row)
+    #     with open(preprocessed_data['path_to_save'], 'wb') as f:
+    #         pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
     # save_data(preprocessed_data)
 
     for i, row in enumerate(test_data.values):
@@ -182,7 +182,7 @@ if __name__ == '__main__':
     formatter = logging.Formatter(fmt_str)
     stdout_handler = logging.StreamHandler(sys.stdout)
     logger.addHandler(stdout_handler)
-    file_handler = logging.FileHandler('Preprocessing_data.log')
+    file_handler = logging.FileHandler('Logs/Preprocessing_data.log')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     main()
