@@ -1,7 +1,7 @@
 #!/bin/sh
 
 #PBS -q a6500g10q@vm-pbs2
-#PBS -l select=1:ngpus=1:ncpus=1:mem=16g
+#PBS -l select=1:ngpus=1:ncpus=8:mem=16g
 #PBS -l walltime=48:00:00
 #PBS -j oe
 #PBS -m abe

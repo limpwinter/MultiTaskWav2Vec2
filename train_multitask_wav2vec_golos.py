@@ -18,31 +18,25 @@ from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from transformers import Wav2Vec2Model
-from MultitaskWav2vec2 import MultitaskWav2vecModel
+from MultitaskWav2vec2 import MultitaskWav2vecModel, MultitaskWav2vecModel_3
 from russian_g2p.DataHandler import (DataProcessor,
                                      GolosDataset,
                                      DataCollator
                                      )
+
 # 11.05.2022 (23:24)
 
-'''
-ver 0:
-no loss weight
-no sent emb loss
-2-phonems
-10-pos tags
-23-chars
-'''
+
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
-tb = SummaryWriter('runs/multitask-10min-multistep_lr-adamw-pkl-no_sent_v0')
+tb = SummaryWriter('stat_run/multitask-v3-t20')
 
 
-def mean_pooling(token_embeddings):
-    input_mask_expanded = torch.ones_like(token_embeddings, dtype=torch.long)
-    sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
-    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-    return sum_embeddings / sum_mask
+# def mean_pooling(token_embeddings):
+#     input_mask_expanded = torch.ones_like(token_embeddings, dtype=torch.long)
+#     sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+#     sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+#     return sum_embeddings / sum_mask
 
 
 def train(model, device, train_dataloader, epoch, lr_scheduler, optimizer):
@@ -57,6 +51,7 @@ def train(model, device, train_dataloader, epoch, lr_scheduler, optimizer):
     for idx in range(len(train_dataloader)):
         start_loading_time = time.time()
         batch = next(iterable_dataloder)
+        end_getting_batch_time = time.time()
         batch = {k: v.to(device) for k, v in batch.items()}
         data = batch['input_values']
         mask = batch['attention_mask']
@@ -99,6 +94,7 @@ def train(model, device, train_dataloader, epoch, lr_scheduler, optimizer):
         # tb.add_scalar('Loss/sent_embedding/train', sent_emb_loss.item(), epoch * n + idx)
         tb.add_scalar('Time/forward/train', float(end_forward_time - start_forward_time), epoch * n + idx)
         tb.add_scalar('Time/data gen/train', float(end_loading_time - start_loading_time), epoch * n + idx)
+        tb.add_scalar('Time/getting batch/train', float(end_getting_batch_time - start_loading_time), epoch * n + idx)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
@@ -106,9 +102,9 @@ def train(model, device, train_dataloader, epoch, lr_scheduler, optimizer):
     lr_scheduler.step()
     tb.add_scalar('Average Loss/characters/train', running_char_loss / len(train_dataloader), epoch)
     tb.add_scalar('Average Loss/POS Tags/train', running_pos_tags_loss / len(train_dataloader), epoch)
-    # tb.add_scalar('Average Loss/sentence_embeddings/train', running_sent_emb_loss / len(train_dataloader), epoch)
     tb.add_scalar('Average Loss/phonems/train', running_phonem_loss / len(train_dataloader), epoch)
     tb.add_scalar('Average Loss/overall/train', running_loss / len(train_dataloader), epoch)
+    # tb.add_scalar('Average Loss/sentence_embeddings/train', running_sent_emb_loss / len(train_dataloader), epoch)
     logger.info(f'Average loss on {epoch} epoch: {running_loss / len(train_dataloader)}')
 
 
@@ -130,6 +126,7 @@ def test(model, device, test_dataloader, processor, epoch):
         for idx in range(len(test_dataloader)):
             start_loading_time = time.time()
             batch = next(iterable_dataloder)
+            end_getting_batch_time = time.time()
             batch = {k: v.to(device) for k, v in batch.items()}
             data = batch['input_values']
             mask = batch['attention_mask']
@@ -163,6 +160,8 @@ def test(model, device, test_dataloader, processor, epoch):
 
             tb.add_scalar('Time/data gen/test', float(end_loading_time - start_loading_time), epoch * n + idx)
             tb.add_scalar('Time/forward/test', float(end_forward_time - start_forward_time), epoch * n + idx)
+            tb.add_scalar('Time/getting batch/test', float(end_getting_batch_time - start_loading_time),
+                          epoch * n + idx)
 
             logits = torch.argmax(logits, dim=-1).cpu().detach()
             pred_ids = processor.decode_batch_predictions(logits)
@@ -184,15 +183,15 @@ def test(model, device, test_dataloader, processor, epoch):
             info_msg = ''
             for ground_truth, pred_str in printed_results:
                 info_msg += f'\nPREDICTED: {pred_str}\n' \
-                            f'TARGET: {ground_truth}' \
+                            f'TARGET: {ground_truth}\n' \
                             f'{"-" * 100}'
             logger.info(info_msg)
-        tb.add_scalar('WER/test', running_wer / len(test_dataloader), epoch)
-        tb.add_scalar('CER/test', running_cer / len(test_dataloader), epoch)
         tb.add_scalar('Average Loss/overall/test', running_loss / n, epoch)
         tb.add_scalar('Average Loss/character/test', running_char_loss / n, epoch)
         tb.add_scalar('Average Loss/pos_tags/test', running_pos_tags_loss / n, epoch)
         tb.add_scalar('Average Loss/phonems/test', running_phonem_loss / n, epoch)
+        tb.add_scalar('WER/test', running_wer / n, epoch)
+        tb.add_scalar('CER/test', running_cer / n, epoch)
         logger.info(
             f'Average test loss on {epoch} epoch: {running_loss / n}')
         logger.info(
@@ -213,7 +212,8 @@ def main():
     # MODEL_PATH = 'models/wav2vec2-large-xlsr-53'
     # BATCH_SIZE = 16
     NUM_EPOCHS = 4000
-    RANDOM_STATE = 256
+    RANDOM_STATE = 64
+    logger.info(f'Random seed: {RANDOM_STATE}')
     np.random.seed(RANDOM_STATE)
     torch.manual_seed(RANDOM_STATE)
     np.random.seed(RANDOM_STATE)
@@ -221,6 +221,7 @@ def main():
     logger.info('Reading Data...')
     train_data = pd.read_json(os.path.join(args.data_folder, 'train', '10hours.jsonl'), lines=True)
     test_data = pd.read_json(os.path.join(args.data_folder, 'test', 'crowd', 'manifest.jsonl'), lines=True)
+
     test_data = test_data[test_data['text'] != ' ']
     train_data = train_data[train_data['text'] != ' ']
     train_data = train_data[train_data['duration'] <= 6]
@@ -233,7 +234,6 @@ def main():
     logger.info(f'Testing examples: {len(test_data)}')
 
     data_processor = DataProcessor()
-
     logger.info('Creating dataloaders...')
 
     datacollator = DataCollator(processor=data_processor.processor, padding=True)
@@ -247,7 +247,7 @@ def main():
         data_path=Path(args.data_folder, 'test_pkl', 'crowd'),
         logger=logger
     )
-    logger.info('Creating dataloaders...')
+    # logger.info('Creating dataloaders...')
     train_dataloader = DataLoader(
         train_golos,
         args.batch_size,
@@ -261,26 +261,25 @@ def main():
         collate_fn=datacollator
     )
 
-    logger.info('Loading tensorboard')
+    # logger.info('Loading tensorboard')
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
     logger.info(f'Device: {device}')
     logger.info('Loading Model...')
 
-    multitask_wav2vec2 = MultitaskWav2vecModel(args.pretrained_wav2vec2_path,
+    multitask_wav2vec2 = MultitaskWav2vecModel_3(args.pretrained_wav2vec2_path,
                                                data_processor.characters_char_map,
                                                data_processor.phonems_phn_map,
                                                data_processor.pos_tags_tag_map
                                                ).to(device)
-    #
+    logger.info(sum(p.numel() for p in multitask_wav2vec2.parameters() if p.requires_grad))
     # multitask_wav2vec2.load_state_dict(torch.load('models/checkpoints/MultitaskWav2vec_35_epoch'))
 
     num_training_steps = NUM_EPOCHS * len(train_dataloader)
     logger.info(f'Num of training steps: {num_training_steps}')
-    # progress_bar = tqdm(range(num_training_steps))
-    optimizer = AdamW(multitask_wav2vec2.parameters())
+    optimizer = AdamW(model.parameters())  # lr=1e-3
     # 0.3162 * 0.3162 = 0.1
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 100, 150, 220], gamma=0.3162)
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 100, 150, 200], gamma=0.3162)
     next_epoch = 1
 
     for epoch in range(next_epoch, NUM_EPOCHS + next_epoch):
@@ -288,10 +287,10 @@ def main():
         train(
             model=multitask_wav2vec2,
             device=device,
-            train_dataloader=train_dataloader,  # TODO Change gen to loader
+            train_dataloader=train_dataloader,
             lr_scheduler=lr_scheduler,
             optimizer=optimizer,
-            epoch=epoch,
+            epoch=epoch
         )
         logger.info(f'Start testing on {epoch} epoch.')
         test(
@@ -300,8 +299,8 @@ def main():
             test_dataloader=test_dataloader,
             processor=data_processor,
             epoch=epoch)
-        if epoch % 10 == 0:
-            Path('models/checkpoints/configuration_v0').mkdir(
+        if epoch % 20 == 0:
+            Path('models/checkpoints/configuration_v3').mkdir(
                 parents=True,
                 exist_ok=True
             )
@@ -310,7 +309,7 @@ def main():
                 'model_state_dict': multitask_wav2vec2.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'ls_scheduler_state_dict': lr_scheduler.state_dict()},
-                f'models/checkpoints/configuration_v0/MultitaskWav2vec_{epoch}_epoch')
+                f'models/checkpoints/configuration_v3/MultitaskWav2vec_{epoch}_epoch_t3')
     tb.close()
     logger.info('Saving model')
     torch.save({
@@ -318,7 +317,7 @@ def main():
         'model_state_dict': multitask_wav2vec2.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'lr_scheduler_state_dict': lr_scheduler.state_dict()},
-        f'models/checkpoints/configuration_v0/MultitaskWav2vec_final')
+        f'models/checkpoints/configuration_v3/MultitaskWav2vec_final')
     logger.info('Done')
 
 
@@ -329,7 +328,7 @@ if __name__ == '__main__':
     formatter = logging.Formatter(fmt_str)
     stdout_handler = logging.StreamHandler(sys.stdout)
     logger.addHandler(stdout_handler)
-    file_handler = logging.FileHandler('Multitask_Wav2Vec2_v0.log')
+    file_handler = logging.FileHandler('Logs/Multitask_Wav2Vec2_v1_t20.log')
 
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
