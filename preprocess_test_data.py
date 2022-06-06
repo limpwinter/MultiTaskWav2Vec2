@@ -154,19 +154,19 @@ def main():
     #         pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
     # save_data(preprocessed_data)
 
-    # for i, row in enumerate(test_data.values):
-    #     if i % 50 == 0:
-    #         info_msg = f'Test preprocessing is {(float(i) / len(test_data)) * 100:.1f}% complete.'
-    #         # logger.info(info_msg)
-    #         print(info_msg)
-    #     _, path, text, duration = row
-    #     pkl_abs_path = Path(new_test_data_path, path)
-    #     new_data_path = pathlib.Path(pkl_abs_path).with_suffix('.pkl')
-    #     if new_data_path.exists():
-    #         continue
-    #     preprocessed_data = preprocess_data(test_data_path, new_test_data_path, data_processor, row)
-    #     with open(preprocessed_data['path_to_save'], 'wb') as f:
-    #         pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    for i, row in enumerate(test_data.values):
+        if i % 50 == 0:
+            info_msg = f'Test preprocessing is {(float(i) / len(test_data)) * 100:.1f}% complete.'
+            # logger.info(info_msg)
+            print(info_msg)
+        _, path, text, duration = row
+        pkl_abs_path = Path(new_test_data_path, path)
+        new_data_path = pathlib.Path(pkl_abs_path).with_suffix('.pkl')
+        if new_data_path.exists():
+            continue
+        preprocessed_data = preprocess_data(test_data_path, new_test_data_path, data_processor, row)
+        with open(preprocessed_data['path_to_save'], 'wb') as f:
+            pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
     # save_data(preprocessed_data)
     # vocab_path = Path(args.data_folder, 'vocabs')
     # vocab_path.mkdir(parents=True, exist_ok=True)
